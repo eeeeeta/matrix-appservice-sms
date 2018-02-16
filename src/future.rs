@@ -112,6 +112,15 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
             &core.handle()
         ).expect("matrix client initialization");
         let urc_rx = modem.take_urc_rx().unwrap();
+
+        let fut = cmd::sms::set_sms_textmode(&mut modem, false);
+        core.run(fut)
+            .expect("setting sms textmode");
+        let fut = cmd::sms::set_new_message_indications(&mut modem,
+                                                        cmd::sms::NewMessageNotification::SendDirectlyOrBuffer,
+                                                        cmd::sms::NewMessageStorage::StoreAndNotify);
+        core.run(fut)
+            .expect("setting sms new message indications");
         let mfut = MessagingFuture {
             int_tx, int_rx, urc_rx, db,
             modem: Rc::new(RefCell::new(modem)),
