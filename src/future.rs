@@ -149,13 +149,13 @@ struct UserAndRoomDetails {
     is_new: bool
 }
 impl MessagingFuture {
-    fn get_user_and_room(&self, addr: &PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
+    fn get_user_and_room(&self, addr_orig: PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
         use gm::types::replies::{RoomCreationOptions, RoomPreset, RoomVisibility};
 
         let mx = self.mx.clone();
         let hsl = self.hs_localpart.clone();
 
-        let addr = normalize_address(&addr);
+        let addr = normalize_address(&addr_orig);
         let conn = self.db.get().expect("couldn't get a db connection");
         let recv = {
             use schema::recipients::dsl::*;
@@ -194,7 +194,7 @@ impl MessagingFuture {
                     is_direct: true,
                     invite: vec![mxid.clone()],
                     room_alias_name: Some(format!("_sms_{}", addr)),
-                    name: Some(format!("{} (SMS)", addr)),
+                    name: Some(format!("{} (SMS)", addr_orig)),
                     visibility: Some(RoomVisibility::Private),
                     ..Default::default()
                 };
@@ -229,7 +229,7 @@ impl MessagingFuture {
         let admin = self.admin.clone();
 
         info!("Processing message received from {}", msg.pdu.originating_address);
-        let fut = self.get_user_and_room(&msg.pdu.originating_address);
+        let fut = self.get_user_and_room(msg.pdu.originating_address.clone());
         async_block! {
             let UserAndRoomDetails { room, user_id, is_new } = await!(fut)?;
             mx.borrow_mut().alter_user_id(user_id);
@@ -284,7 +284,7 @@ impl MessagingFuture {
         match cmd {
             AdminCommand::NewConversation(addr) => {
                 info!("Creating new conversation with {}", addr);
-                let fut = self.get_user_and_room(&addr);
+                let fut = self.get_user_and_room(addr);
                 Box::new(async_block! {
                     let UserAndRoomDetails { room, .. } = await!(fut)?;
                     await!(room.cli(&mut mx.borrow_mut())
