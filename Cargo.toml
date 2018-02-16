@@ -1,0 +1,30 @@
+[package]
+authors = ["eeeeeta <eeeeeta@users.noreply.github.com>"]
+name = "matrix-appservice-sms"
+version = "0.1.0"
+
+[dependencies]
+dotenv = "0.9.0"
+env_logger = "0.5.3"
+failure = "0.1.1"
+futures-await = "0.1"
+log = "0.4.1"
+r2d2 = "0.8"
+r2d2-diesel = "1.0"
+rocket = "0.3"
+rocket_codegen = "0.3"
+rocket_contrib = "0.3"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
+tokio-core = "0.1.12"
+
+[dependencies.diesel]
+features = ["postgres"]
+version = "1.0.0"
+
+[dependencies.glitch-in-the-matrix]
+path = "../glitch-in-the-matrix/glitch-in-the-matrix"
+
+[dependencies.huawei-modem]
+path = "../huawei-modem"
