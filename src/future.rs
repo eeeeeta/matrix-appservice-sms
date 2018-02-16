@@ -5,22 +5,26 @@ use huawei_modem::HuaweiModem;
 use futures::sync::mpsc::{UnboundedSender, UnboundedReceiver, self};
 use gm::MatrixClient;
 use gm::types::messages::Message;
+use gm::types::events::MetaFull;
+use gm::types::content::Content;
+use gm::types::content::room::types::Membership;
 use gm::room::{RoomExt, Room};
 use gm::errors::MatrixErrorKind;
 use huawei_modem::at::AtResponse;
 use huawei_modem::cmd;
 use huawei_modem::cmd::sms::{SmsMessage, MessageStatus, DeletionOptions};
-use huawei_modem::pdu::{DecodedMessage, PduAddress};
+use huawei_modem::pdu::{DecodedMessage, PduAddress, AddressType, Pdu, GsmMessageData};
 use huawei_modem::errors::HuaweiError;
-use futures::{Future, Stream, Poll, Async, self};
+use futures::{Future, Stream, Poll, Async};
 use futures::prelude::*;
 use diesel::prelude::*;
+use models::{Recipient, NewRecipient};
 use failure::{SyncFailure, Error};
 use pool::Pool;
 use std::sync::Arc;
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::panic;
+use std::convert::TryFrom;
 
 pub fn normalize_address(addr: &PduAddress) -> String {
     let ton: u8 = addr.type_addr.into();
@@ -30,19 +34,31 @@ pub fn normalize_address(addr: &PduAddress) -> String {
     }
     ret
 }
-pub struct SendRequest {
-    pub message: Message,
-    pub room: String,
-    pub event_id: String
+pub fn un_normalize_address(addr: &str) -> Option<PduAddress> {
+    if addr.len() < 3 {
+        return None;
+    }
+    let toa = u8::from_str_radix(&addr[0..2], 16).ok()?;
+    let toa = AddressType::try_from(toa).ok()?;
+    let mut addr: PduAddress = addr.parse().unwrap();
+    addr.number.0.remove(0);
+    addr.number.0.remove(0);
+    addr.type_addr = toa;
+    Some(addr)
 }
+
 pub enum IntMessage {
     CmglComplete(Vec<SmsMessage>),
     CmglFailed(HuaweiError),
-    SendRequest(SendRequest)
+    MatrixEvent(MetaFull, Content)
+}
+enum AdminCommand {
+    NewConversation(PduAddress),
+    Unrecognized
 }
 pub type Mx = Rc<RefCell<MatrixClient>>;
 pub struct MessagingFuture {
-    modem: HuaweiModem,
+    modem: Rc<RefCell<HuaweiModem>>,
     int_tx: UnboundedSender<IntMessage>,
     int_rx: UnboundedReceiver<IntMessage>,
     urc_rx: UnboundedReceiver<AtResponse>,
@@ -55,6 +71,7 @@ pub struct MessagingFuture {
 pub type MessagingHandle<'a> = State<'a, Arc<MessagingData>>;
 pub struct MessagingData {
     pub rem: Remote,
+    pub hs_token: String,
     pub tx: UnboundedSender<IntMessage>
 }
 pub fn attach_tokio(rocket: Rocket) -> Rocket {
@@ -72,6 +89,9 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
         .to_string();
     let as_token = rocket.config().get_str("as_token")
         .expect("'as_token' in config")
+        .to_string();
+    let hs_token = rocket.config().get_str("hs_token")
+        .expect("'hs_token' in config")
         .to_string();
     let hs_url = rocket.config().get_str("hs_url")
         .expect("'hs_url' in config")
@@ -93,7 +113,8 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
         ).expect("matrix client initialization");
         let urc_rx = modem.take_urc_rx().unwrap();
         let mfut = MessagingFuture {
-            modem, int_tx, int_rx, urc_rx, db,
+            int_tx, int_rx, urc_rx, db,
+            modem: Rc::new(RefCell::new(modem)),
             handle: core.handle(),
             admin: admin.into(),
             hs_localpart: hs_localpart.into(),
@@ -108,20 +129,24 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
         .expect("receiving remote from futures thread");
     let md = MessagingData {
         rem: remote,
+        hs_token,
         tx: itx2
     };
     rocket.manage(Arc::new(md))
 }
+struct UserAndRoomDetails {
+    user_id: String,
+    room: Room<'static>,
+    is_new: bool
+}
 impl MessagingFuture {
-    pub fn process_received_message(&self, msg: SmsMessage) -> Box<Future<Item = (), Error = Error>> {
-        use models::{Recipient, NewRecipient};
+    fn get_user_and_room(&self, addr: &PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
         use gm::types::replies::{RoomCreationOptions, RoomPreset, RoomVisibility};
 
         let mx = self.mx.clone();
         let hsl = self.hs_localpart.clone();
-        let admin = self.admin.clone();
 
-        let addr = normalize_address(&msg.pdu.originating_address);  
+        let addr = normalize_address(&addr);
         let conn = self.db.get().expect("couldn't get a db connection");
         let recv = {
             use schema::recipients::dsl::*;
@@ -130,17 +155,13 @@ impl MessagingFuture {
                 .first::<Recipient>(&*conn)
                 .optional()
         };
-        let recv = match recv {
-            Ok(x) => x,
-            Err(e) => return Box::new(futures::future::err(e.into()))
-        };
-        Box::new(async_block! {
-            let room;
-            let user_id;
-            if let Some(recv) = recv {
-                room = Room::from_id(recv.room_id);
-                user_id = format!("@{}:{}", recv.user_id, hsl);
-                info!("Using existing user {} in room {}", user_id, room.id);
+        async_block! {
+            if let Some(recv) = recv? {
+                Ok(UserAndRoomDetails {
+                    user_id: format!("@{}:{}", recv.user_id, hsl),
+                    room: Room::from_id(recv.room_id),
+                    is_new: false
+                })
             } else {
                 let localpart = format!("_sms_{}", addr);
                 let mxid = format!("@{}:{}", localpart, hsl);
@@ -149,7 +170,7 @@ impl MessagingFuture {
                     let mut good = false;
                     if let &MatrixErrorKind::BadRequest(ref e) = e.kind() {
                         if e.errcode == "M_USER_IN_USE" {
-                            // all good!
+                            // probably already registered it
                             good = true;
                         }
                     }
@@ -162,7 +183,7 @@ impl MessagingFuture {
                 let opts = RoomCreationOptions {
                     preset: Some(RoomPreset::TrustedPrivateChat),
                     is_direct: true,
-                    invite: vec![admin, mxid.clone()],
+                    invite: vec![mxid.clone()],
                     room_alias_name: Some(format!("_sms_{}", addr)),
                     name: Some(format!("{} (SMS)", addr)),
                     visibility: Some(RoomVisibility::Private),
@@ -186,25 +207,131 @@ impl MessagingFuture {
                         .values(&new_recipient)
                         .execute(&*conn)?;
                 }
-                user_id = mxid;
-                room = rpl.room;
+                Ok(UserAndRoomDetails {
+                    user_id: mxid,
+                    room: rpl.room,
+                    is_new: true
+                })
             }
+        }
+    }
+    fn process_received_message(&self, msg: SmsMessage) -> impl Future<Item = (), Error = Error> {
+        let mx = self.mx.clone();
+        let admin = self.admin.clone();
+
+        info!("Processing message received from {}", msg.pdu.originating_address);
+        let fut = self.get_user_and_room(&msg.pdu.originating_address);
+        async_block! {
+            let UserAndRoomDetails { room, user_id, is_new } = await!(fut)?;
             mx.borrow_mut().alter_user_id(user_id);
+            if is_new {
+                await!(room.cli(&mut mx.borrow_mut())
+                       .invite_user(&admin))
+                    .map_err(|e| SyncFailure::new(e))?;
+            }
             let text = match msg.pdu.get_message_data().decode_message() {
                 Ok(DecodedMessage { text, .. }) => text,
                 Err(e) => format!("[failed to decode: {}]", e)
             };
+            if text.starts_with("DISPLAYNAME ") {
+                let disp = text.replace("DISPLAYNAME ", "");
+                info!("User requested displayname change to {}", disp);
+                await!(mx.borrow_mut().set_displayname(disp))
+                    .map_err(|e| SyncFailure::new(e))?;
+                return Ok(())
+            }
             let msg = Message::Text {
                 body: text,
                 formatted_body: None,
                 format: None
             };
-            info!("Sending message {:?} to room {}", msg, room.id);
+            debug!("Sending message {:?} to room {}", msg, room.id);
             await!(room.cli(&mut mx.borrow_mut())
                    .send(msg))
                 .map_err(|e| SyncFailure::new(e))?;
             Ok(())
-        })
+        }
+    }
+    fn process_invite(&self, room: Room<'static>) -> impl Future<Item = (), Error = Error> {
+        let mx = self.mx.clone();
+        let hsl = self.hs_localpart.clone();
+        async_block! {
+            mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
+            await!(mx.borrow_mut().join(&room.id))
+                .map_err(|e| SyncFailure::new(e))?;
+            Ok(())
+        }
+    }
+    fn process_admin_command(&self, sender: String, room: Room<'static>, text: &str) -> Box<Future<Item = (), Error = Error>> {
+        let mx = self.mx.clone();
+
+        let text = text.split(" ").collect::<Vec<_>>();
+        let cmd = match &text as &[&str] {
+            &["!sms", recipient] => {
+                AdminCommand::NewConversation(recipient.parse().unwrap())
+            },
+            _ => AdminCommand::Unrecognized
+        };
+        match cmd {
+            AdminCommand::NewConversation(addr) => {
+                info!("Creating new conversation with {}", addr);
+                let fut = self.get_user_and_room(&addr);
+                Box::new(async_block! {
+                    let UserAndRoomDetails { room, .. } = await!(fut)?;
+                    await!(room.cli(&mut mx.borrow_mut())
+                           .invite_user(&sender))
+                        .map_err(|e| SyncFailure::new(e))?;
+                    Ok(())
+                })
+            },
+            AdminCommand::Unrecognized => {
+                info!("Unrecognized admin command.");
+                Box::new(async_block! {
+                    await!(room.cli(&mut mx.borrow_mut())
+                           .send_simple("Unrecognized command."))
+                        .map_err(|e| SyncFailure::new(e))?;
+                    Ok(())
+                })
+            }
+        }
+    }
+    fn process_sending_message(&self, recv: Recipient, sender: String, rm: Message) -> impl Future<Item = (), Error = Error> {
+        let mx = self.mx.clone();
+        let modem = self.modem.clone();
+
+        async_block! {
+            let num = un_normalize_address(&recv.phone_number)
+                .ok_or(format_err!("Invalid address in database - this shouldn't really ever happen"))?;
+            let text = match rm {
+                Message::Text { body, .. } => body,
+                Message::Notice { body, .. } => body,
+                Message::Image { body, url, .. } => format!("[Image '{}' - download at {}]", body, url),
+                Message::File { body, url, .. } => format!("[File '{}' - download at {}]", body, url),
+                Message::Location { body, geo_uri } => format!("[Location {} - geo URI {}]", body, geo_uri),
+                Message::Audio { body, url, .. } => format!("[Audio file '{}' - download at {}]", body, url),
+                Message::Video { body, url, .. } => format!("[Video file '{}' - download at {}]", body, url),
+                Message::Emote { body } => {
+                    let disp = await!(mx.borrow_mut().get_displayname(&sender))
+                        .map_err(|e| SyncFailure::new(e))?;
+                    format!("* {} {}", disp.displayname, body)
+                }
+            };
+            info!("Sending message to {}...", num);
+            debug!("Message content: \"{}\"", text);
+            let data = GsmMessageData::encode_message(&text);
+            if data.len() > 3 {
+                Err(format_err!("Message is greater than 3 SMSes in length; refusing to transmit such a long message."))?;
+            }
+            let parts = data.len();
+            for (i, part) in data.into_iter().enumerate() {
+                info!("Sending part {}/{}...", i+1, parts);
+                let pdu = Pdu::make_simple_message(num.clone(), part);
+                debug!("PDU: {:?}", pdu);
+                await!(cmd::sms::send_sms_pdu(&mut modem.borrow_mut(), &pdu))?;
+            }
+            info!("Sent!");
+            Ok(())
+        }
     }
 }
 impl Future for MessagingFuture {
@@ -216,9 +343,9 @@ impl Future for MessagingFuture {
             let x = x.expect("urc_rx stopped producing");
             if let AtResponse::InformationResponse { param, .. } = x {
                 if param == "+CMTI" {
-                    info!("Received +CMTI indication");
+                    debug!("Received +CMTI indication");
                     let tx = self.int_tx.clone();
-                    let fut = cmd::sms::list_sms_pdu(&mut self.modem,
+                    let fut = cmd::sms::list_sms_pdu(&mut self.modem.borrow_mut(),
                                                      MessageStatus::All)
                         .then(move |results| {
                             match results {
@@ -243,7 +370,7 @@ impl Future for MessagingFuture {
                 IntMessage::CmglComplete(res) => {
                     info!("+CMGL complete");
                     for msg in res {
-                        info!("Processing message: {:?}", msg);
+                        debug!("Processing message: {:?}", msg);
                         if msg.status != MessageStatus::ReceivedUnread {
                             continue;
                         }
@@ -253,8 +380,7 @@ impl Future for MessagingFuture {
                             });
                         self.handle.spawn(fut);
                     }
-                    info!("Deleting read messages");
-                    let fut = cmd::sms::del_sms_pdu(&mut self.modem,
+                    let fut = cmd::sms::del_sms_pdu(&mut self.modem.borrow_mut(),
                                                     DeletionOptions::DeleteReadAndOutgoing)
                         .map_err(|e| {
                             error!("Failed to delete messages: {}", e);
@@ -264,7 +390,93 @@ impl Future for MessagingFuture {
                 IntMessage::CmglFailed(e) => {
                     error!("Message listing failed: {}", e);
                 },
-                IntMessage::SendRequest(_) => {}
+                IntMessage::MatrixEvent(meta, content) => {
+                    if meta.sender.starts_with("@_sms") {
+                        continue;
+                    }
+                    match content {
+                        Content::RoomMember(m) => {
+                            if let Some(invitee) = meta.state_key {
+                                if let Some(room) = meta.room {
+                                    if let Membership::Invite = m.membership {
+                                        if invitee == format!("@_sms_bot:{}", self.hs_localpart) {
+                                            info!("Invited by {} to {}", meta.sender, room.id);
+                                            let fut = self.process_invite(room)
+                                                .map_err(|e| error!("Failed to process invite: {}", e));
+                                            self.handle.spawn(fut);
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Content::RoomMessage(m) => {
+                            if let Some(room) = meta.room {
+                                let conn = self.db.get().expect("couldn't get a db connection");
+                                let recv = {
+                                    use schema::recipients::dsl::*;
+
+                                    recipients.filter(room_id.eq(&room.id))
+                                        .first::<Recipient>(&*conn)
+                                        .optional()?
+                                };
+                                if let Some(recv) = recv {
+                                    let mx = self.mx.clone();
+                                    let sender = meta.sender.clone();
+                                    let hsl = self.hs_localpart.clone();
+                                    debug!("Sending message from {}: {:?}", meta.sender, m);
+                                    let fut = self.process_sending_message(recv, meta.sender, m)
+                                        .then(move |res| {
+                                            async_block! {
+                                                if let Err(e) = res {
+                                                    warn!("Error sending message: {}", e);
+                                                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
+                                                    let disp = await!(mx.borrow_mut().get_displayname(&sender));
+                                                    if let Err(e) = disp {
+                                                        error!("Error sending 'error sending message' message (getting displayname): {}", e);
+                                                        let res: Result<(), ()> = Ok(());
+                                                        return res;
+                                                    }
+                                                    let disp = disp.unwrap();
+                                                    let message = Message::Text {
+                                                        body: format!("{}: error sending message: {}", disp.displayname, e),
+                                                        format: Some("org.matrix.custom.html".into()),
+                                                        formatted_body: Some(format!("<a href=\"https://matrix.to/#/{}\">{}</a>: error sending message: <pre>{}</pre>",
+                                                                                     sender,
+                                                                                     disp.displayname,
+                                                                                     e))
+                                                    };
+                                                    let res = await!(room.cli(&mut mx.borrow_mut())
+                                                                     .send(message));
+                                                    if let Err(e) = res {
+                                                        error!("Error sending 'error sending message' message: {}", e);
+                                                    }
+                                                    else {
+                                                        debug!("Sent error notif.");
+                                                    }
+                                                }
+                                                let res: Result<(), ()> = Ok(());
+                                                res
+                                            }
+                                        });
+                                    self.handle.spawn(fut);
+                                }
+                                else {
+                                    if let Message::Text { ref body, .. } = m {
+                                        if meta.sender == self.admin && body.starts_with("!") {
+                                            info!("Processing admin message: {}", body);
+                                            let fut = self.process_admin_command(meta.sender, room, body)
+                                                .map_err(|e| error!("Failed to process admin message: {}", e));
+                                            self.handle.spawn(fut);
+                                            continue;
+                                        }
+                                    }
+                                    warn!("No recipient for event {}: {:?}", meta.event_id, m);
+                                }
+                            }
+                        },
+                        x => debug!("Discarding event: {:?}", x)
+                    }
+                }
             }
         }
         Ok(Async::NotReady)
