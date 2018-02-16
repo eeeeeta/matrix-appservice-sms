@@ -1,4 +1,4 @@
-use schema::{putrequests, recipients, users};
+use schema::{putrequests, recipients};
 
 #[derive(Insertable, Queryable)]
 #[table_name="putrequests"]
@@ -19,14 +19,4 @@ pub struct NewRecipient<'a> {
     pub user_id: &'a str,
     pub room_id: &'a str
 }
-#[derive(Queryable)]
-pub struct User {
-    pub id: i32,
-    pub mxid: String,
-    pub config_room_id: Option<String>
-}
-#[derive(Insertable)]
-#[table_name="users"]
-pub struct NewUser<'a> {
-    pub mxid: &'a str
-}
+

@@ -12,11 +12,3 @@ table! {
         room_id -> Varchar,
     }
 }
-
-table! {
-    users (id) {
-        id -> Int4,
-        mxid -> Varchar,
-        config_room_id -> Nullable<Varchar>,
-    }
-}
