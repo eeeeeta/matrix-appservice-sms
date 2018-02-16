@@ -412,10 +412,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "glitch-in-the-matrix"
 version = "0.13.1"
+source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#178d2055b6fe0f0dd51ad74f527e8ca765f927f6"
 dependencies = [
  "error-chain 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.18 (registry+https://github.com/rust-lang/crates.io-index)",
- "gm-types 0.3.1",
+ "gm-types 0.3.1 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)",
  "hyper 0.11.18 (registry+https://github.com/rust-lang/crates.io-index)",
  "hyper-openssl 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "percent-encoding 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -427,6 +428,7 @@ dependencies = [
 [[package]]
 name = "gm-types"
 version = "0.3.1"
+source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#178d2055b6fe0f0dd51ad74f527e8ca765f927f6"
 dependencies = [
  "error-chain 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.27 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -450,6 +452,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "huawei-modem"
 version = "0.1.0"
+source = "git+https://github.com/eeeeeta/huawei-modem#163f09d4909ea9b691f1c639e02b1753de1a9c56"
 dependencies = [
  "bytes 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "derive_is_enum_variant 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -624,8 +627,8 @@ dependencies = [
  "env_logger 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "failure 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-await 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "glitch-in-the-matrix 0.13.1",
- "huawei-modem 0.1.0",
+ "glitch-in-the-matrix 0.13.1 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)",
+ "huawei-modem 0.1.0 (git+https://github.com/eeeeeta/huawei-modem)",
  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "r2d2 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "r2d2-diesel 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1517,8 +1520,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum futures-await-synom 0.12.0 (registry+https://github.com/rust-lang/crates.io-index)" = "a7c84de0ba04a67d7fc0fb4e3218ba539da65890549922d9d2bc874ba6240030"
 "checksum futures-cpupool 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)" = "ab90cde24b3319636588d0c35fe03b1333857621051837ed769faefb4c2162e4"
 "checksum gcc 0.3.54 (registry+https://github.com/rust-lang/crates.io-index)" = "5e33ec290da0d127825013597dbdfc28bee4964690c7ce1166cbc2a7bd08b1bb"
+"checksum glitch-in-the-matrix 0.13.1 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)" = "<none>"
+"checksum gm-types 0.3.1 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)" = "<none>"
 "checksum heck 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ea04fa3ead4e05e51a7c806fc07271fdbde4e246a6c6d1efd52e72230b771b82"
 "checksum httparse 1.2.4 (registry+https://github.com/rust-lang/crates.io-index)" = "c2f407128745b78abc95c0ffbe4e5d37427fdc0d45470710cfef8c44522a2e37"
+"checksum huawei-modem 0.1.0 (git+https://github.com/eeeeeta/huawei-modem)" = "<none>"
 "checksum hyper 0.10.13 (registry+https://github.com/rust-lang/crates.io-index)" = "368cb56b2740ebf4230520e2b90ebb0461e69034d85d1945febd9b3971426db2"
 "checksum hyper 0.11.18 (registry+https://github.com/rust-lang/crates.io-index)" = "c4f9b276c87e3fc1902a8bdfcce264c3f7c8a1c35e5e0c946062739f55026664"
 "checksum hyper-openssl 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)" = "f27dfb95e5ea760641907f49e43121783ca2af03e7ecd3cfb0c1dde63aa883f8"

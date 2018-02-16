@@ -24,7 +24,8 @@ features = ["postgres"]
 version = "1.0.0"
 
 [dependencies.glitch-in-the-matrix]
-path = "../glitch-in-the-matrix/glitch-in-the-matrix"
+git = "https://github.com/eeeeeta/glitch-in-the-matrix"
+branch = "develop"
 
 [dependencies.huawei-modem]
-path = "../huawei-modem"
+git = "https://github.com/eeeeeta/huawei-modem"

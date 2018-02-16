@@ -423,6 +423,7 @@ impl Future for MessagingFuture {
                                     let mx = self.mx.clone();
                                     let sender = meta.sender.clone();
                                     let hsl = self.hs_localpart.clone();
+                                    let ei = meta.event_id;
                                     debug!("Sending message from {}: {:?}", meta.sender, m);
                                     let fut = self.process_sending_message(recv, meta.sender, m)
                                         .then(move |res| {
@@ -445,6 +446,7 @@ impl Future for MessagingFuture {
                                                                                      disp.displayname,
                                                                                      e))
                                                     };
+                                                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
                                                     let res = await!(room.cli(&mut mx.borrow_mut())
                                                                      .send(message));
                                                     if let Err(e) = res {
@@ -452,6 +454,17 @@ impl Future for MessagingFuture {
                                                     }
                                                     else {
                                                         debug!("Sent error notif.");
+                                                    }
+                                                }
+                                                else {
+                                                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
+                                                    let res = await!(room.cli(&mut mx.borrow_mut())
+                                                                     .read_receipt(&ei));
+                                                    if let Err(e) = res {
+                                                        warn!("Error sending read receipt: {}", e);
+                                                    }
+                                                    else {
+                                                        debug!("Sent read receipt.");
                                                     }
                                                 }
                                                 let res: Result<(), ()> = Ok(());
