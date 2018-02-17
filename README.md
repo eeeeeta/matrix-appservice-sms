@@ -13,6 +13,7 @@ it doesn't really make sense to support *more* than one user...
   - Other models of 3G modem are available. Essentially, if it uses the AT/Hayes command set, and implements a bunch of common
     commands, it'll probably work.
   - This has been tested working with the Huawei E3531, though.
+- a **nightly** version of [Rust](http://rust-lang.org/); see below for details
 - a decent amount of patience ;p
 
 ## How do I set this up?
