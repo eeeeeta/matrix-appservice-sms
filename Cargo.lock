@@ -452,7 +452,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "huawei-modem"
 version = "0.1.0"
-source = "git+https://github.com/eeeeeta/huawei-modem#8a1b54aca2bed1751ad447c8b454d00158c45736"
+source = "git+https://github.com/eeeeeta/huawei-modem#346a5030c13cc1c4266dd872d8f48da0b56657da"
 dependencies = [
  "bytes 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "derive_is_enum_variant 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
