@@ -1,0 +1,13 @@
+id: REPLACE_ME
+hs_token: REPLACE_THIS_ONE_TOO
+as_token: AND_FINALLY_REPLACE_THIS_ONE
+namespaces:
+  users:
+    - exclusive: true
+      regex: '@_sms_.*'
+  aliases:
+    - exclusive: true
+      regex: '#_sms_.*'
+  rooms: []
+url: 'http://URL_OF_YOUR_APPSERVICE_INSTANCE'
+sender_localpart: _sms_bot

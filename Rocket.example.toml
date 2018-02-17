@@ -1,0 +1,21 @@
+[development]
+# Your postgres database URL.
+database_url = "postgresql://YOUR_DATABASE_URL_HERE"
+# The path to your modem
+modem_path = "/dev/ttyUSB2"
+# The as_token from sms-registration.yaml
+as_token = "AS_TOKEN_FROM_SMS_REGISTRATION_DOT_YAML"
+# The hs_token from sms-registration.yaml
+hs_token = "HS_TOKEN_FROM_SMS_REGISTRATION_DOT_YAML"
+# The URL of your homeserver - i.e. where the Matrix APIs are exposed.
+hs_url = "URL_OF_HOMESERVER"
+# The name of your homeserver, as it appears in MXIDs of your homeserver's users.
+# e.g. matrix.org or theta.eu.org.
+hs_localpart = "HOMESERVER_NAME (e.g. matrix.org, theta.eu.org)"
+# The MXID of the admin user of this AS - the person who
+# will actually be using the bridge.
+# e.g. @randomadmin:theta.eu.org
+admin = "MXID_OF_ADMIN (e.g. @randomadmin:theta.eu.org)"
+port = 4948
+# Uncomment to allow the AS to be reachable from any host.
+# address = "0.0.0.0"
