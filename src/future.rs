@@ -16,7 +16,6 @@ use huawei_modem::cmd;
 use huawei_modem::cmd::sms::{SmsMessage, MessageStatus, DeletionOptions};
 use huawei_modem::pdu::{PduAddress, AddressType, Pdu};
 use huawei_modem::gsm_encoding::{DecodedMessage, GsmMessageData};
-use std::collections::HashMap;
 use huawei_modem::errors::HuaweiError;
 use futures::{Future, Stream, Poll, Async};
 use futures::prelude::*;
@@ -153,19 +152,6 @@ struct UserAndRoomDetails {
     is_new: bool
 }
 impl MessagingFuture {
-    fn power_levels() -> PowerLevels {
-        PowerLevels {
-            ban: 0,
-            events: HashMap::new(),
-            events_default: 0,
-            invite: 0,
-            kick: 0,
-            redact: 0,
-            state_default: 0,
-            users: HashMap::new(),
-            users_default: 100
-        }
-    }
     fn get_user_and_room(&self, addr_orig: PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
         use gm::types::replies::{RoomCreationOptions, RoomPreset, RoomVisibility};
 
@@ -206,10 +192,6 @@ impl MessagingFuture {
                 }
                 mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
                 info!("Creating new room");
-                let pl = Self::power_levels();
-                let val = ::serde_json::to_value(pl)?;
-                let mut creation_content = HashMap::new();
-                creation_content.insert("m.room.power_levels".to_string(), val);
                 let opts = RoomCreationOptions {
                     preset: Some(RoomPreset::TrustedPrivateChat),
                     is_direct: true,
@@ -217,7 +199,6 @@ impl MessagingFuture {
                     room_alias_name: Some(format!("_sms_{}", addr)),
                     name: Some(format!("{} (SMS)", addr_orig)),
                     visibility: Some(RoomVisibility::Private),
-                    creation_content,
                     ..Default::default()
                 };
                 let rpl = await!(mx.borrow_mut().create_room(opts))?;
@@ -252,10 +233,17 @@ impl MessagingFuture {
         let fut = self.get_user_and_room(msg.pdu.originating_address.clone());
         async_block! {
             let UserAndRoomDetails { room, user_id, is_new } = await!(fut)?;
-            mx.borrow_mut().alter_user_id(user_id);
             if is_new {
+                mx.borrow_mut().alter_user_id(user_id.clone());
                 await!(room.cli(&mut mx.borrow_mut())
                        .invite_user(&admin))?;
+                mx.borrow_mut().alter_user_id(user_id.clone());
+                let mut pl = await!(room.cli(&mut mx.borrow_mut())
+                                    .get_state::<PowerLevels>("m.room.power_levels", None))?;
+                pl.users.insert(admin, 100);
+                mx.borrow_mut().alter_user_id(user_id.clone());
+                await!(room.cli(&mut mx.borrow_mut())
+                       .set_state::<PowerLevels>("m.room.power_levels", None, pl))?;
             }
             let text = match msg.pdu.get_message_data().decode_message() {
                 Ok(DecodedMessage { text, .. }) => text,
@@ -264,6 +252,7 @@ impl MessagingFuture {
             if text.starts_with("DISPLAYNAME ") {
                 let disp = text.replace("DISPLAYNAME ", "");
                 info!("User requested displayname change to {}", disp);
+                mx.borrow_mut().alter_user_id(user_id);
                 await!(mx.borrow_mut().set_displayname(disp))?;
                 return Ok(())
             }
@@ -273,6 +262,7 @@ impl MessagingFuture {
                 format: None
             };
             debug!("Sending message {:?} to room {}", msg, room.id);
+            mx.borrow_mut().alter_user_id(user_id);
             await!(room.cli(&mut mx.borrow_mut())
                    .send(msg))?;
             Ok(())
@@ -295,7 +285,7 @@ impl MessagingFuture {
             &["!sms", recipient] => {
                 AdminCommand::NewConversation(recipient.parse().unwrap())
             },
-            &["!resetpl", recipient] => {
+            &["!opme", recipient] => {
                 AdminCommand::ResetPowerLevels(recipient.parse().unwrap())
             },
             _ => AdminCommand::Unrecognized
@@ -305,7 +295,8 @@ impl MessagingFuture {
                 info!("Creating new conversation with {}", addr);
                 let fut = self.get_user_and_room(addr);
                 Box::new(async_block! {
-                    let UserAndRoomDetails { room, .. } = await!(fut)?;
+                    let UserAndRoomDetails { room, user_id, .. } = await!(fut)?;
+                    mx.borrow_mut().alter_user_id(user_id);
                     await!(room.cli(&mut mx.borrow_mut())
                            .invite_user(&sender))?;
                     Ok(())
@@ -315,10 +306,14 @@ impl MessagingFuture {
                 info!("Fixing power levels for {}", addr);
                 let fut = self.get_user_and_room(addr);
                 Box::new(async_block! {
-                    let UserAndRoomDetails { room, .. } = await!(fut)?;
-                    let pl = Self::power_levels();
+                    let UserAndRoomDetails { room, user_id, .. } = await!(fut)?;
+                    mx.borrow_mut().alter_user_id(user_id.clone());
+                    let mut pl = await!(room.cli(&mut mx.borrow_mut())
+                                        .get_state::<PowerLevels>("m.room.power_levels", None))?;
+                    pl.users.insert(sender, 100);
+                    mx.borrow_mut().alter_user_id(user_id);
                     await!(room.cli(&mut mx.borrow_mut())
-                           .set_state("m.room.power_levels", None, pl))?;
+                           .set_state::<PowerLevels>("m.room.power_levels", None, pl))?;
                     Ok(())
                 })
             },
