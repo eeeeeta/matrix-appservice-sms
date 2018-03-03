@@ -8,18 +8,21 @@ use gm::types::messages::Message;
 use gm::types::events::MetaFull;
 use gm::types::content::Content;
 use gm::types::content::room::types::Membership;
+use gm::types::content::room::PowerLevels;
 use gm::room::{RoomExt, Room};
-use gm::errors::MatrixErrorKind;
+use gm::errors::MatrixError;
 use huawei_modem::at::AtResponse;
 use huawei_modem::cmd;
 use huawei_modem::cmd::sms::{SmsMessage, MessageStatus, DeletionOptions};
-use huawei_modem::pdu::{DecodedMessage, PduAddress, AddressType, Pdu, GsmMessageData};
+use huawei_modem::pdu::{PduAddress, AddressType, Pdu};
+use huawei_modem::gsm_encoding::{DecodedMessage, GsmMessageData};
+use std::collections::HashMap;
 use huawei_modem::errors::HuaweiError;
 use futures::{Future, Stream, Poll, Async};
 use futures::prelude::*;
 use diesel::prelude::*;
 use models::{Recipient, NewRecipient};
-use failure::{SyncFailure, Error};
+use failure::Error;
 use pool::Pool;
 use std::sync::Arc;
 use std::rc::Rc;
@@ -54,6 +57,7 @@ pub enum IntMessage {
 }
 enum AdminCommand {
     NewConversation(PduAddress),
+    ResetPowerLevels(PduAddress),
     Unrecognized
 }
 pub type Mx = Rc<RefCell<MatrixClient>>;
@@ -149,6 +153,19 @@ struct UserAndRoomDetails {
     is_new: bool
 }
 impl MessagingFuture {
+    fn power_levels() -> PowerLevels {
+        PowerLevels {
+            ban: 0,
+            events: HashMap::new(),
+            events_default: 0,
+            invite: 0,
+            kick: 0,
+            redact: 0,
+            state_default: 0,
+            users: HashMap::new(),
+            users_default: 100
+        }
+    }
     fn get_user_and_room(&self, addr_orig: PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
         use gm::types::replies::{RoomCreationOptions, RoomPreset, RoomVisibility};
 
@@ -177,18 +194,22 @@ impl MessagingFuture {
                 info!("Registering new user {}", mxid);
                 if let Err(e) = await!(mx.borrow_mut().as_register_user(localpart.clone())) {
                     let mut good = false;
-                    if let &MatrixErrorKind::BadRequest(ref e) = e.kind() {
+                    if let MatrixError::BadRequest(ref e) = e {
                         if e.errcode == "M_USER_IN_USE" {
                             // probably already registered it
                             good = true;
                         }
                     }
                     if !good {
-                        return Err(SyncFailure::new(e))?;
+                        return Err(e)?;
                     }
                 }
                 mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
                 info!("Creating new room");
+                let pl = Self::power_levels();
+                let val = ::serde_json::to_value(pl)?;
+                let mut creation_content = HashMap::new();
+                creation_content.insert("m.room.power_levels".to_string(), val);
                 let opts = RoomCreationOptions {
                     preset: Some(RoomPreset::TrustedPrivateChat),
                     is_direct: true,
@@ -196,14 +217,13 @@ impl MessagingFuture {
                     room_alias_name: Some(format!("_sms_{}", addr)),
                     name: Some(format!("{} (SMS)", addr_orig)),
                     visibility: Some(RoomVisibility::Private),
+                    creation_content,
                     ..Default::default()
                 };
-                let rpl = await!(mx.borrow_mut().create_room(opts))
-                    .map_err(|e| SyncFailure::new(e))?;
+                let rpl = await!(mx.borrow_mut().create_room(opts))?;
                 info!("Joining new room");
                 mx.borrow_mut().alter_user_id(mxid.clone());
-                await!(mx.borrow_mut().join(&rpl.room.id))
-                    .map_err(|e| SyncFailure::new(e))?;
+                await!(mx.borrow_mut().join(&rpl.room.id))?;
                 {
                     use schema::recipients;
 
@@ -235,8 +255,7 @@ impl MessagingFuture {
             mx.borrow_mut().alter_user_id(user_id);
             if is_new {
                 await!(room.cli(&mut mx.borrow_mut())
-                       .invite_user(&admin))
-                    .map_err(|e| SyncFailure::new(e))?;
+                       .invite_user(&admin))?;
             }
             let text = match msg.pdu.get_message_data().decode_message() {
                 Ok(DecodedMessage { text, .. }) => text,
@@ -245,8 +264,7 @@ impl MessagingFuture {
             if text.starts_with("DISPLAYNAME ") {
                 let disp = text.replace("DISPLAYNAME ", "");
                 info!("User requested displayname change to {}", disp);
-                await!(mx.borrow_mut().set_displayname(disp))
-                    .map_err(|e| SyncFailure::new(e))?;
+                await!(mx.borrow_mut().set_displayname(disp))?;
                 return Ok(())
             }
             let msg = Message::Text {
@@ -256,8 +274,7 @@ impl MessagingFuture {
             };
             debug!("Sending message {:?} to room {}", msg, room.id);
             await!(room.cli(&mut mx.borrow_mut())
-                   .send(msg))
-                .map_err(|e| SyncFailure::new(e))?;
+                   .send(msg))?;
             Ok(())
         }
     }
@@ -266,8 +283,7 @@ impl MessagingFuture {
         let hsl = self.hs_localpart.clone();
         async_block! {
             mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-            await!(mx.borrow_mut().join(&room.id))
-                .map_err(|e| SyncFailure::new(e))?;
+            await!(mx.borrow_mut().join(&room.id))?;
             Ok(())
         }
     }
@@ -279,6 +295,9 @@ impl MessagingFuture {
             &["!sms", recipient] => {
                 AdminCommand::NewConversation(recipient.parse().unwrap())
             },
+            &["!resetpl", recipient] => {
+                AdminCommand::ResetPowerLevels(recipient.parse().unwrap())
+            },
             _ => AdminCommand::Unrecognized
         };
         match cmd {
@@ -288,8 +307,18 @@ impl MessagingFuture {
                 Box::new(async_block! {
                     let UserAndRoomDetails { room, .. } = await!(fut)?;
                     await!(room.cli(&mut mx.borrow_mut())
-                           .invite_user(&sender))
-                        .map_err(|e| SyncFailure::new(e))?;
+                           .invite_user(&sender))?;
+                    Ok(())
+                })
+            },
+            AdminCommand::ResetPowerLevels(addr) => {
+                info!("Fixing power levels for {}", addr);
+                let fut = self.get_user_and_room(addr);
+                Box::new(async_block! {
+                    let UserAndRoomDetails { room, .. } = await!(fut)?;
+                    let pl = Self::power_levels();
+                    await!(room.cli(&mut mx.borrow_mut())
+                           .set_state("m.room.power_levels", None, pl))?;
                     Ok(())
                 })
             },
@@ -297,8 +326,7 @@ impl MessagingFuture {
                 info!("Unrecognized admin command.");
                 Box::new(async_block! {
                     await!(room.cli(&mut mx.borrow_mut())
-                           .send_simple("Unrecognized command."))
-                        .map_err(|e| SyncFailure::new(e))?;
+                           .send_simple("Unrecognized command."))?;
                     Ok(())
                 })
             }
@@ -320,8 +348,7 @@ impl MessagingFuture {
                 Message::Audio { body, url, .. } => format!("[Audio file '{}' - download at {}]", body, url),
                 Message::Video { body, url, .. } => format!("[Video file '{}' - download at {}]", body, url),
                 Message::Emote { body } => {
-                    let disp = await!(mx.borrow_mut().get_displayname(&sender))
-                        .map_err(|e| SyncFailure::new(e))?;
+                    let disp = await!(mx.borrow_mut().get_displayname(&sender))?;
                     format!("* {} {}", disp.displayname, body)
                 }
             };
