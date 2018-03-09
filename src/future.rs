@@ -302,6 +302,7 @@ impl MessagingFuture {
     fn process_admin_command(&self, sender: String, room: Room<'static>, text: &str) -> Box<Future<Item = (), Error = Error>> {
         let mx = self.mx.clone();
         let modem = self.modem.clone();
+        let hsl = self.hs_localpart.clone();
         info!("Processing admin command {} from {}", text, sender);
         let text = text.split(" ").collect::<Vec<_>>();
         let cmd = match &text as &[&str] {
@@ -319,6 +320,7 @@ impl MessagingFuture {
                 let fut = self.get_user_and_room(addr.clone());
                 Box::new(async_block! {
                     let _ = await!(fut)?;
+                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
                     await!(room.cli(&mut mx.borrow_mut())
                            .send_simple(format!("New conversation with {} created.", addr)))?;
                     Ok(())
@@ -328,6 +330,7 @@ impl MessagingFuture {
                 info!("Getting registration status");
                 Box::new(async_block! {
                     let regst = await!(cmd::network::get_registration(&mut modem.borrow_mut()))?;
+                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
                     await!(room.cli(&mut mx.borrow_mut())
                            .send_simple(format!("Registration status: {}", regst)))?;
                     Ok(())
@@ -337,6 +340,7 @@ impl MessagingFuture {
                 info!("Getting signal status");
                 Box::new(async_block! {
                     let sq = await!(cmd::network::get_signal_quality(&mut modem.borrow_mut()))?;
+                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
                     await!(room.cli(&mut mx.borrow_mut())
                            .send_simple(format!("RSSI: {}\nBER: {}", sq.rssi, sq.ber)))?;
                     Ok(())
@@ -345,6 +349,7 @@ impl MessagingFuture {
             AdminCommand::Help => {
                 info!("Help requested.");
                 Box::new(async_block! {
+                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
                     await!(room.cli(&mut mx.borrow_mut())
                            .send_simple(r#"This is an instance of matrix-appservice-sms (https://github.com/eeeeeta/matrix-appservice-sms/).
 Currently supported commands:
@@ -356,6 +361,7 @@ Currently supported commands:
             AdminCommand::Unrecognized => {
                 info!("Unrecognized admin command.");
                 Box::new(async_block! {
+                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
                     await!(room.cli(&mut mx.borrow_mut())
                            .send_simple("Unrecognized command. Try !help for more information."))?;
                     Ok(())
