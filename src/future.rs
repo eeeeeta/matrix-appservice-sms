@@ -56,7 +56,9 @@ pub enum IntMessage {
 }
 enum AdminCommand {
     NewConversation(PduAddress),
-    ResetPowerLevels(PduAddress),
+    GetRegistration,
+    GetSignal,
+    Help,
     Unrecognized
 }
 pub type Mx = Rc<RefCell<MatrixClient>>;
@@ -148,11 +150,45 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
 }
 struct UserAndRoomDetails {
     user_id: String,
-    room: Room<'static>,
-    is_new: bool
+    room: Room<'static>
 }
 impl MessagingFuture {
     fn get_user_and_room(&self, addr_orig: PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
+        let details = self.get_user_and_room_simple(addr_orig);
+        let mx = self.mx.clone();
+        let admin = self.admin.clone();
+
+        async_block! {
+            let UserAndRoomDetails { user_id, room } = await!(details)?;
+            mx.borrow_mut().alter_user_id(user_id.clone());
+            let jm = await!(room.cli(&mut mx.borrow_mut())
+                            .get_joined_members())?;
+            if jm.joined.get(&admin).is_none() {
+                mx.borrow_mut().alter_user_id(user_id.clone());
+                if let Err(e) = await!(room.cli(&mut mx.borrow_mut())
+                                       .invite_user(&admin)) {
+                    error!("Error inviting user {} to room {}: {}", admin, room.id, e);
+                }
+            }
+            let pl = await!(room.cli(&mut mx.borrow_mut())
+                            .get_user_power_level(admin.clone()))?;
+            if pl < 100 {
+                mx.borrow_mut().alter_user_id(user_id.clone());
+                if let Ok(mut pl) = await!(room.cli(&mut mx.borrow_mut())
+                                       .get_typed_state::<PowerLevels>("m.room.power_levels", None)) {
+                    pl.users.insert(admin.clone(), 100);
+                    mx.borrow_mut().alter_user_id(user_id.clone());
+                    if let Err(e) = await!(room.cli(&mut mx.borrow_mut())
+                                           .set_typed_state::<PowerLevels>("m.room.power_levels", None, pl)) {
+                        error!("Error setting powerlevels of user {} in room {}: {}", admin, room.id, e);
+                    }
+                }
+            }
+            Ok(UserAndRoomDetails { user_id, room })
+        }
+
+    }
+    fn get_user_and_room_simple(&self, addr_orig: PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
         use gm::types::replies::{RoomCreationOptions, RoomPreset, RoomVisibility};
 
         let mx = self.mx.clone();
@@ -171,8 +207,7 @@ impl MessagingFuture {
             if let Some(recv) = recv? {
                 Ok(UserAndRoomDetails {
                     user_id: format!("@{}:{}", recv.user_id, hsl),
-                    room: Room::from_id(recv.room_id),
-                    is_new: false
+                    room: Room::from_id(recv.room_id)
                 })
             } else {
                 let localpart = format!("_sms_{}", addr);
@@ -219,32 +254,19 @@ impl MessagingFuture {
                 }
                 Ok(UserAndRoomDetails {
                     user_id: mxid,
-                    room: rpl.room,
-                    is_new: true
+                    room: rpl.room
                 })
             }
         }
     }
     fn process_received_message(&self, msg: SmsMessage) -> impl Future<Item = (), Error = Error> {
         let mx = self.mx.clone();
-        let admin = self.admin.clone();
 
         info!("Processing message received from {}", msg.pdu.originating_address);
         let fut = self.get_user_and_room(msg.pdu.originating_address.clone());
         async_block! {
-            let UserAndRoomDetails { room, user_id, is_new } = await!(fut)?;
-            if is_new {
-                mx.borrow_mut().alter_user_id(user_id.clone());
-                await!(room.cli(&mut mx.borrow_mut())
-                       .invite_user(&admin))?;
-                mx.borrow_mut().alter_user_id(user_id.clone());
-                let mut pl = await!(room.cli(&mut mx.borrow_mut())
-                                    .get_state::<PowerLevels>("m.room.power_levels", None))?;
-                pl.users.insert(admin, 100);
-                mx.borrow_mut().alter_user_id(user_id.clone());
-                await!(room.cli(&mut mx.borrow_mut())
-                       .set_state::<PowerLevels>("m.room.power_levels", None, pl))?;
-            }
+            let UserAndRoomDetails { room, user_id } = await!(fut)?;
+
             let text = match msg.pdu.get_message_data().decode_message() {
                 Ok(DecodedMessage { text, .. }) => text,
                 Err(e) => format!("[failed to decode: {}]", e)
@@ -279,49 +301,63 @@ impl MessagingFuture {
     }
     fn process_admin_command(&self, sender: String, room: Room<'static>, text: &str) -> Box<Future<Item = (), Error = Error>> {
         let mx = self.mx.clone();
-
+        let modem = self.modem.clone();
+        info!("Processing admin command {} from {}", text, sender);
         let text = text.split(" ").collect::<Vec<_>>();
         let cmd = match &text as &[&str] {
             &["!sms", recipient] => {
                 AdminCommand::NewConversation(recipient.parse().unwrap())
             },
-            &["!opme", recipient] => {
-                AdminCommand::ResetPowerLevels(recipient.parse().unwrap())
-            },
+            &["!help"] => AdminCommand::Help,
+            &["!reg"] => AdminCommand::GetRegistration,
+            &["!csq"] => AdminCommand::GetSignal,
             _ => AdminCommand::Unrecognized
         };
         match cmd {
             AdminCommand::NewConversation(addr) => {
                 info!("Creating new conversation with {}", addr);
-                let fut = self.get_user_and_room(addr);
+                let fut = self.get_user_and_room(addr.clone());
                 Box::new(async_block! {
-                    let UserAndRoomDetails { room, user_id, .. } = await!(fut)?;
-                    mx.borrow_mut().alter_user_id(user_id);
+                    let _ = await!(fut)?;
                     await!(room.cli(&mut mx.borrow_mut())
-                           .invite_user(&sender))?;
+                           .send_simple(format!("New conversation with {} created.", addr)))?;
                     Ok(())
                 })
             },
-            AdminCommand::ResetPowerLevels(addr) => {
-                info!("Fixing power levels for {}", addr);
-                let fut = self.get_user_and_room(addr);
+            AdminCommand::GetRegistration => {
+                info!("Getting registration status");
                 Box::new(async_block! {
-                    let UserAndRoomDetails { room, user_id, .. } = await!(fut)?;
-                    mx.borrow_mut().alter_user_id(user_id.clone());
-                    let mut pl = await!(room.cli(&mut mx.borrow_mut())
-                                        .get_state::<PowerLevels>("m.room.power_levels", None))?;
-                    pl.users.insert(sender, 100);
-                    mx.borrow_mut().alter_user_id(user_id);
+                    let regst = await!(cmd::network::get_registration(&mut modem.borrow_mut()))?;
                     await!(room.cli(&mut mx.borrow_mut())
-                           .set_state::<PowerLevels>("m.room.power_levels", None, pl))?;
+                           .send_simple(format!("Registration status: {}", regst)))?;
                     Ok(())
                 })
             },
+            AdminCommand::GetSignal => {
+                info!("Getting signal status");
+                Box::new(async_block! {
+                    let sq = await!(cmd::network::get_signal_quality(&mut modem.borrow_mut()))?;
+                    await!(room.cli(&mut mx.borrow_mut())
+                           .send_simple(format!("RSSI: {}\nBER: {}", sq.rssi, sq.ber)))?;
+                    Ok(())
+                })
+            },
+            AdminCommand::Help => {
+                info!("Help requested.");
+                Box::new(async_block! {
+                    await!(room.cli(&mut mx.borrow_mut())
+                           .send_simple(r#"This is an instance of matrix-appservice-sms (https://github.com/eeeeeta/matrix-appservice-sms/).
+Currently supported commands:
+- !sms <num>: start or resume an SMS conversation with a given phone number
+- !help: display this text"#))?;
+                    Ok(())
+                })
+            }
             AdminCommand::Unrecognized => {
                 info!("Unrecognized admin command.");
                 Box::new(async_block! {
                     await!(room.cli(&mut mx.borrow_mut())
-                           .send_simple("Unrecognized command."))?;
+                           .send_simple("Unrecognized command. Try !help for more information."))?;
                     Ok(())
                 })
             }
