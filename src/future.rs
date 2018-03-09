@@ -354,6 +354,8 @@ impl MessagingFuture {
                            .send_simple(r#"This is an instance of matrix-appservice-sms (https://github.com/eeeeeta/matrix-appservice-sms/).
 Currently supported commands:
 - !sms <num>: start or resume an SMS conversation with a given phone number
+- !csq: check signal quality
+- !reg: get the modem's network registration status
 - !help: display this text"#))?;
                     Ok(())
                 })
