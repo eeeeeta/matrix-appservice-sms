@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::convert::TryFrom;
+use std::collections::BTreeMap;
 
 pub fn normalize_address(addr: &PduAddress) -> String {
     let ton: u8 = addr.type_addr.into();
@@ -48,7 +49,12 @@ pub fn un_normalize_address(addr: &str) -> Option<PduAddress> {
     addr.type_addr = toa;
     Some(addr)
 }
-
+#[derive(Serialize, Deserialize)]
+pub struct CsmsData {
+    pub parts: BTreeMap<u8, String>,
+    pub total_parts: u8,
+    pub finished: bool
+}
 pub enum IntMessage {
     CmglComplete(Vec<SmsMessage>),
     CmglFailed(HuaweiError),
@@ -267,10 +273,53 @@ impl MessagingFuture {
         async_block! {
             let UserAndRoomDetails { room, user_id } = await!(fut)?;
 
-            let text = match msg.pdu.get_message_data().decode_message() {
-                Ok(DecodedMessage { text, .. }) => text,
-                Err(e) => format!("[failed to decode: {}]", e)
-            };
+            let DecodedMessage { mut text, udh } = msg.pdu.get_message_data().decode_message()?;
+            let data = udh.as_ref().and_then(|x| x.get_concatenated_sms_data());
+            if let Some(data) = data {
+                debug!("Message is concatenated - data {:?}", data);
+                let sk = format!("ref-{}", data.reference);
+                let mut state = match await!(room.cli(&mut mx.borrow_mut())
+                                         .get_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk))) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        if let MatrixError::HttpCode(::gm::http::StatusCode::NotFound) = e {
+                            CsmsData {
+                                parts: BTreeMap::new(),
+                                total_parts: data.parts,
+                                finished: false
+                            }
+                        }
+                        else {
+                            return Err(e.into());
+                        }
+                    }
+                };
+                if state.total_parts != data.parts || state.finished {
+                    debug!("Remaking CsmsData");
+                    state = CsmsData {
+                        parts: BTreeMap::new(),
+                        total_parts: data.parts,
+                        finished: false
+                    }
+                }
+                state.parts.insert(data.sequence, ::std::mem::replace(&mut text, String::new()));
+                if state.parts.len() >= state.total_parts as usize {
+                    debug!("Concatenated SMS finished; sending real message");
+                    let mut ret = String::new();
+                    for (_, text) in state.parts.iter() {
+                        ret += text;
+                    }
+                    state.finished = true;
+                    text = ret;
+                }
+                let finished = state.finished;
+                await!(room.cli(&mut mx.borrow_mut())
+                       .set_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk), state))?;
+                if !finished {
+                    debug!("Concatenated SMS incomplete; not continuing");
+                    return Ok(());
+                }
+            }
             if text.starts_with("DISPLAYNAME ") {
                 let disp = text.replace("DISPLAYNAME ", "");
                 info!("User requested displayname change to {}", disp);
