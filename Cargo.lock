@@ -416,25 +416,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "glitch-in-the-matrix"
-version = "0.13.1"
-source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#2d932a721a36e4bdf9c40165e930eddb75b4f588"
+version = "0.14.0"
+source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#47901f2eedbb98c14b64ff6a49fb2345d723fd8f"
 dependencies = [
  "failure 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "failure_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.18 (registry+https://github.com/rust-lang/crates.io-index)",
- "gm-types 0.3.1 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)",
+ "gm-types 0.4.0 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)",
  "hyper 0.11.22 (registry+https://github.com/rust-lang/crates.io-index)",
  "hyper-openssl 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "percent-encoding 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.29 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_json 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-core 0.1.13 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uuid 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "gm-types"
-version = "0.3.1"
-source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#2d932a721a36e4bdf9c40165e930eddb75b4f588"
+version = "0.4.0"
+source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#47901f2eedbb98c14b64ff6a49fb2345d723fd8f"
 dependencies = [
  "error-chain 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.29 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -641,7 +642,7 @@ dependencies = [
  "env_logger 0.5.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "failure 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-await 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "glitch-in-the-matrix 0.13.1 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)",
+ "glitch-in-the-matrix 0.14.0 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)",
  "huawei-modem 0.1.0 (git+https://github.com/eeeeeta/huawei-modem)",
  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "r2d2 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1476,6 +1477,14 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
+name = "uuid"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "rand 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "vcpkg"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1592,8 +1601,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum futures-await-synom 0.12.0 (registry+https://github.com/rust-lang/crates.io-index)" = "a7c84de0ba04a67d7fc0fb4e3218ba539da65890549922d9d2bc874ba6240030"
 "checksum futures-cpupool 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)" = "ab90cde24b3319636588d0c35fe03b1333857621051837ed769faefb4c2162e4"
 "checksum gcc 0.3.54 (registry+https://github.com/rust-lang/crates.io-index)" = "5e33ec290da0d127825013597dbdfc28bee4964690c7ce1166cbc2a7bd08b1bb"
-"checksum glitch-in-the-matrix 0.13.1 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)" = "<none>"
-"checksum gm-types 0.3.1 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)" = "<none>"
+"checksum glitch-in-the-matrix 0.14.0 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)" = "<none>"
+"checksum gm-types 0.4.0 (git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop)" = "<none>"
 "checksum heck 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ea04fa3ead4e05e51a7c806fc07271fdbde4e246a6c6d1efd52e72230b771b82"
 "checksum httparse 1.2.4 (registry+https://github.com/rust-lang/crates.io-index)" = "c2f407128745b78abc95c0ffbe4e5d37427fdc0d45470710cfef8c44522a2e37"
 "checksum huawei-modem 0.1.0 (git+https://github.com/eeeeeta/huawei-modem)" = "<none>"
@@ -1710,6 +1719,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum untrusted 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)" = "f392d7819dbe58833e26872f5f6f0d68b7bbbe90fc3667e98731c4a15ad9a7ae"
 "checksum url 1.7.0 (registry+https://github.com/rust-lang/crates.io-index)" = "f808aadd8cfec6ef90e4a14eb46f24511824d1ac596b9682703c87056c8678b7"
 "checksum utf8-ranges 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = "662fab6525a98beff2921d7f61a39e7d59e0b425ebc7d0d9e66d316e55124122"
+"checksum uuid 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)" = "990fb49481275abe3c8e2a91339c009cd6146d9f38fc3413e4163d892cbaffbb"
 "checksum vcpkg 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "9e0a7d8bed3178a8fb112199d466eeca9ed09a14ba8ad67718179b4fd5487d0b"
 "checksum version_check 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)" = "6b772017e347561807c1aa192438c5fd74242a670a6cffacc40f2defd1dc069d"
 "checksum void 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)" = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"

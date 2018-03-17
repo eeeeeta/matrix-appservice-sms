@@ -9,6 +9,7 @@ use gm::types::events::MetaFull;
 use gm::types::content::Content;
 use gm::types::content::room::types::Membership;
 use gm::types::content::room::PowerLevels;
+use gm::profile::Profile;
 use gm::room::{RoomExt, Room};
 use gm::errors::MatrixError;
 use huawei_modem::at::AtResponse;
@@ -161,31 +162,23 @@ struct UserAndRoomDetails {
 impl MessagingFuture {
     fn get_user_and_room(&self, addr_orig: PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
         let details = self.get_user_and_room_simple(addr_orig);
-        let mx = self.mx.clone();
+        let mut mx = self.mx.borrow().clone();
         let admin = self.admin.clone();
 
         async_block! {
             let UserAndRoomDetails { user_id, room } = await!(details)?;
-            mx.borrow_mut().alter_user_id(user_id.clone());
-            let jm = await!(room.cli(&mut mx.borrow_mut())
-                            .get_joined_members())?;
+            mx.alter_user_id(user_id.clone());
+            let jm = await!(room.cli(&mut mx).get_joined_members())?;
             if jm.joined.get(&admin).is_none() {
-                mx.borrow_mut().alter_user_id(user_id.clone());
-                if let Err(e) = await!(room.cli(&mut mx.borrow_mut())
-                                       .invite_user(&admin)) {
+                if let Err(e) = await!(room.cli(&mut mx).invite_user(&admin)) {
                     error!("Error inviting user {} to room {}: {}", admin, room.id, e);
                 }
             }
-            let pl = await!(room.cli(&mut mx.borrow_mut())
-                            .get_user_power_level(admin.clone()))?;
+            let pl = await!(room.cli(&mut mx).get_user_power_level(admin.clone()))?;
             if pl < 100 {
-                mx.borrow_mut().alter_user_id(user_id.clone());
-                if let Ok(mut pl) = await!(room.cli(&mut mx.borrow_mut())
-                                       .get_typed_state::<PowerLevels>("m.room.power_levels", None)) {
+                if let Ok(mut pl) = await!(room.cli(&mut mx).get_typed_state::<PowerLevels>("m.room.power_levels", None)) {
                     pl.users.insert(admin.clone(), 100);
-                    mx.borrow_mut().alter_user_id(user_id.clone());
-                    if let Err(e) = await!(room.cli(&mut mx.borrow_mut())
-                                           .set_typed_state::<PowerLevels>("m.room.power_levels", None, pl)) {
+                    if let Err(e) = await!(room.cli(&mut mx).set_typed_state::<PowerLevels>("m.room.power_levels", None, pl)) {
                         error!("Error setting powerlevels of user {} in room {}: {}", admin, room.id, e);
                     }
                 }
@@ -197,7 +190,7 @@ impl MessagingFuture {
     fn get_user_and_room_simple(&self, addr_orig: PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
         use gm::types::replies::{RoomCreationOptions, RoomPreset, RoomVisibility};
 
-        let mx = self.mx.clone();
+        let mut mx = self.mx.borrow().clone();
         let hsl = self.hs_localpart.clone();
 
         let addr = normalize_address(&addr_orig);
@@ -219,7 +212,7 @@ impl MessagingFuture {
                 let localpart = format!("_sms_{}", addr);
                 let mxid = format!("@{}:{}", localpart, hsl);
                 info!("Registering new user {}", mxid);
-                if let Err(e) = await!(mx.borrow_mut().as_register_user(localpart.clone())) {
+                if let Err(e) = await!(mx.as_register_user(localpart.clone())) {
                     let mut good = false;
                     if let MatrixError::BadRequest(ref e) = e {
                         if e.errcode == "M_USER_IN_USE" {
@@ -231,7 +224,6 @@ impl MessagingFuture {
                         return Err(e)?;
                     }
                 }
-                mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
                 info!("Creating new room");
                 let opts = RoomCreationOptions {
                     preset: Some(RoomPreset::TrustedPrivateChat),
@@ -242,17 +234,17 @@ impl MessagingFuture {
                     visibility: Some(RoomVisibility::Private),
                     ..Default::default()
                 };
-                let rpl = await!(mx.borrow_mut().create_room(opts))?;
+                let rpl = await!(Room::create(&mut mx, opts))?;
                 info!("Joining new room");
-                mx.borrow_mut().alter_user_id(mxid.clone());
-                await!(mx.borrow_mut().join(&rpl.room.id))?;
+                mx.alter_user_id(mxid.clone());
+                await!(Room::join(&mut mx, &rpl.id))?;
                 {
                     use schema::recipients;
 
                     let new_recipient = NewRecipient {
                         phone_number: &addr,
                         user_id: &localpart,
-                        room_id: &rpl.room.id
+                        room_id: &rpl.id
                     };
                     ::diesel::insert_into(recipients::table)
                         .values(&new_recipient)
@@ -260,26 +252,25 @@ impl MessagingFuture {
                 }
                 Ok(UserAndRoomDetails {
                     user_id: mxid,
-                    room: rpl.room
+                    room: rpl
                 })
             }
         }
     }
     fn process_received_message(&self, msg: SmsMessage) -> impl Future<Item = (), Error = Error> {
-        let mx = self.mx.clone();
+        let mut mx = self.mx.borrow().clone();
 
         info!("Processing message received from {}", msg.pdu.originating_address);
         let fut = self.get_user_and_room(msg.pdu.originating_address.clone());
         async_block! {
             let UserAndRoomDetails { room, user_id } = await!(fut)?;
-
+            mx.alter_user_id(user_id);
             let DecodedMessage { mut text, udh } = msg.pdu.get_message_data().decode_message()?;
             let data = udh.as_ref().and_then(|x| x.get_concatenated_sms_data());
             if let Some(data) = data {
                 info!("Message is concatenated - data {:?}", data);
                 let sk = format!("ref-{}", data.reference);
-                let mut state = match await!(room.cli(&mut mx.borrow_mut())
-                                         .get_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk))) {
+                let mut state = match await!(room.cli(&mut mx).get_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk))) {
                     Ok(s) => s,
                     Err(e) => {
                         let mut val = None;
@@ -319,19 +310,11 @@ impl MessagingFuture {
                     text = ret;
                 }
                 let finished = state.finished;
-                await!(room.cli(&mut mx.borrow_mut())
-                       .set_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk), state))?;
+                await!(room.cli(&mut mx).set_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk), state))?;
                 if !finished {
                     info!("Concatenated SMS incomplete; not continuing");
                     return Ok(());
                 }
-            }
-            if text.starts_with("DISPLAYNAME ") {
-                let disp = text.replace("DISPLAYNAME ", "");
-                info!("User requested displayname change to {}", disp);
-                mx.borrow_mut().alter_user_id(user_id);
-                await!(mx.borrow_mut().set_displayname(disp))?;
-                return Ok(())
             }
             let msg = Message::Text {
                 body: text,
@@ -339,25 +322,20 @@ impl MessagingFuture {
                 format: None
             };
             debug!("Sending message {:?} to room {}", msg, room.id);
-            mx.borrow_mut().alter_user_id(user_id);
-            await!(room.cli(&mut mx.borrow_mut())
-                   .send(msg))?;
+            await!(room.cli(&mut mx).send(msg))?;
             Ok(())
         }
     }
     fn process_invite(&self, room: Room<'static>) -> impl Future<Item = (), Error = Error> {
-        let mx = self.mx.clone();
-        let hsl = self.hs_localpart.clone();
+        let mut mx = self.mx.clone();
         async_block! {
-            mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-            await!(mx.borrow_mut().join(&room.id))?;
+            await!(Room::join(&mut mx, &room.id))?;
             Ok(())
         }
     }
     fn process_admin_command(&self, sender: String, room: Room<'static>, text: &str) -> Box<Future<Item = (), Error = Error>> {
-        let mx = self.mx.clone();
+        let mut mx = self.mx.clone();
         let modem = self.modem.clone();
-        let hsl = self.hs_localpart.clone();
         info!("Processing admin command {} from {}", text, sender);
         let text = text.split(" ").collect::<Vec<_>>();
         let cmd = match &text as &[&str] {
@@ -375,9 +353,7 @@ impl MessagingFuture {
                 let fut = self.get_user_and_room(addr.clone());
                 Box::new(async_block! {
                     let _ = await!(fut)?;
-                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-                    await!(room.cli(&mut mx.borrow_mut())
-                           .send_simple(format!("New conversation with {} created.", addr)))?;
+                    await!(room.cli(&mut mx).send_simple(format!("New conversation with {} created.", addr)))?;
                     Ok(())
                 })
             },
@@ -385,9 +361,7 @@ impl MessagingFuture {
                 info!("Getting registration status");
                 Box::new(async_block! {
                     let regst = await!(cmd::network::get_registration(&mut modem.borrow_mut()))?;
-                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-                    await!(room.cli(&mut mx.borrow_mut())
-                           .send_simple(format!("Registration status: {}", regst)))?;
+                    await!(room.cli(&mut mx).send_simple(format!("Registration status: {}", regst)))?;
                     Ok(())
                 })
             },
@@ -395,18 +369,14 @@ impl MessagingFuture {
                 info!("Getting signal status");
                 Box::new(async_block! {
                     let sq = await!(cmd::network::get_signal_quality(&mut modem.borrow_mut()))?;
-                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-                    await!(room.cli(&mut mx.borrow_mut())
-                           .send_simple(format!("RSSI: {}\nBER: {}", sq.rssi, sq.ber)))?;
+                    await!(room.cli(&mut mx).send_simple(format!("RSSI: {}\nBER: {}", sq.rssi, sq.ber)))?;
                     Ok(())
                 })
             },
             AdminCommand::Help => {
                 info!("Help requested.");
                 Box::new(async_block! {
-                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-                    await!(room.cli(&mut mx.borrow_mut())
-                           .send_simple(r#"This is an instance of matrix-appservice-sms (https://github.com/eeeeeta/matrix-appservice-sms/).
+                    await!(room.cli(&mut mx).send_simple(r#"This is an instance of matrix-appservice-sms (https://github.com/eeeeeta/matrix-appservice-sms/).
 Currently supported commands:
 - !sms <num>: start or resume an SMS conversation with a given phone number
 - !csq: check signal quality
@@ -418,16 +388,14 @@ Currently supported commands:
             AdminCommand::Unrecognized => {
                 info!("Unrecognized admin command.");
                 Box::new(async_block! {
-                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-                    await!(room.cli(&mut mx.borrow_mut())
-                           .send_simple("Unrecognized command. Try !help for more information."))?;
+                    await!(room.cli(&mut mx).send_simple("Unrecognized command. Try !help for more information."))?;
                     Ok(())
                 })
             }
         }
     }
     fn process_sending_message(&self, recv: Recipient, sender: String, rm: Message) -> impl Future<Item = (), Error = Error> {
-        let mx = self.mx.clone();
+        let mut mx = self.mx.clone();
         let modem = self.modem.clone();
 
         async_block! {
@@ -442,7 +410,7 @@ Currently supported commands:
                 Message::Audio { body, url, .. } => format!("[Audio file '{}' - download at {}]", body, url),
                 Message::Video { body, url, .. } => format!("[Video file '{}' - download at {}]", body, url),
                 Message::Emote { body } => {
-                    let disp = await!(mx.borrow_mut().get_displayname(&sender))?;
+                    let disp = await!(Profile::get_displayname(&mut mx, &sender))?;
                     format!("* {} {}", disp.displayname, body)
                 }
             };
@@ -550,9 +518,8 @@ impl Future for MessagingFuture {
                                         .optional()?
                                 };
                                 if let Some(recv) = recv {
-                                    let mx = self.mx.clone();
+                                    let mut mx = self.mx.clone();
                                     let sender = meta.sender.clone();
-                                    let hsl = self.hs_localpart.clone();
                                     let ei = meta.event_id;
                                     debug!("Sending message from {}: {:?}", meta.sender, m);
                                     let fut = self.process_sending_message(recv, meta.sender, m)
@@ -560,8 +527,7 @@ impl Future for MessagingFuture {
                                             async_block! {
                                                 if let Err(e) = res {
                                                     warn!("Error sending message: {}", e);
-                                                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-                                                    let disp = await!(mx.borrow_mut().get_displayname(&sender));
+                                                    let disp = await!(Profile::get_displayname(&mut mx, &sender));
                                                     if let Err(e) = disp {
                                                         error!("Error sending 'error sending message' message (getting displayname): {}", e);
                                                         let res: Result<(), ()> = Ok(());
@@ -576,9 +542,7 @@ impl Future for MessagingFuture {
                                                                                      disp.displayname,
                                                                                      e))
                                                     };
-                                                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-                                                    let res = await!(room.cli(&mut mx.borrow_mut())
-                                                                     .send(message));
+                                                    let res = await!(room.cli(&mut mx).send(message));
                                                     if let Err(e) = res {
                                                         error!("Error sending 'error sending message' message: {}", e);
                                                     }
@@ -587,9 +551,7 @@ impl Future for MessagingFuture {
                                                     }
                                                 }
                                                 else {
-                                                    mx.borrow_mut().alter_user_id(format!("@_sms_bot:{}", hsl));
-                                                    let res = await!(room.cli(&mut mx.borrow_mut())
-                                                                     .read_receipt(&ei));
+                                                    let res = await!(room.cli(&mut mx).read_receipt(&ei));
                                                     if let Err(e) = res {
                                                         warn!("Error sending read receipt: {}", e);
                                                     }
