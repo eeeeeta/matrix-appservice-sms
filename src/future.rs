@@ -276,7 +276,7 @@ impl MessagingFuture {
             let DecodedMessage { mut text, udh } = msg.pdu.get_message_data().decode_message()?;
             let data = udh.as_ref().and_then(|x| x.get_concatenated_sms_data());
             if let Some(data) = data {
-                debug!("Message is concatenated - data {:?}", data);
+                info!("Message is concatenated - data {:?}", data);
                 let sk = format!("ref-{}", data.reference);
                 let mut state = match await!(room.cli(&mut mx.borrow_mut())
                                          .get_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk))) {
@@ -301,7 +301,7 @@ impl MessagingFuture {
                     }
                 };
                 if state.total_parts != data.parts || state.finished {
-                    debug!("Remaking CsmsData");
+                    info!("Remaking CsmsData");
                     state = CsmsData {
                         parts: BTreeMap::new(),
                         total_parts: data.parts,
@@ -310,7 +310,7 @@ impl MessagingFuture {
                 }
                 state.parts.insert(data.sequence, ::std::mem::replace(&mut text, String::new()));
                 if state.parts.len() >= state.total_parts as usize {
-                    debug!("Concatenated SMS finished; sending real message");
+                    info!("Concatenated SMS finished; sending real message");
                     let mut ret = String::new();
                     for (_, text) in state.parts.iter() {
                         ret += text;
@@ -322,7 +322,7 @@ impl MessagingFuture {
                 await!(room.cli(&mut mx.borrow_mut())
                        .set_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk), state))?;
                 if !finished {
-                    debug!("Concatenated SMS incomplete; not continuing");
+                    info!("Concatenated SMS incomplete; not continuing");
                     return Ok(());
                 }
             }
