@@ -282,12 +282,18 @@ impl MessagingFuture {
                                          .get_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk))) {
                     Ok(s) => s,
                     Err(e) => {
-                        if let MatrixError::HttpCode(::gm::http::StatusCode::NotFound) = e {
-                            CsmsData {
-                                parts: BTreeMap::new(),
-                                total_parts: data.parts,
-                                finished: false
+                        let mut val = None;
+                        if let MatrixError::BadRequest(ref e) = e {
+                            if e.errcode == "M_NOT_FOUND" {
+                                val = Some(CsmsData {
+                                    parts: BTreeMap::new(),
+                                    total_parts: data.parts,
+                                    finished: false
+                                });
                             }
+                        }
+                        if let Some(val) = val {
+                            val
                         }
                         else {
                             return Err(e.into());
