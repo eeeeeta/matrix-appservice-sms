@@ -409,7 +409,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "glitch-in-the-matrix"
 version = "0.14.0"
-source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#195383786a50b240db05fd3d1a46ed04df8d20d5"
+source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#46d883fd0abe2fde8468ee6809f8bbe169a42431"
 dependencies = [
  "failure 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "failure_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -427,7 +427,7 @@ dependencies = [
 [[package]]
 name = "gm-types"
 version = "0.4.0"
-source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#195383786a50b240db05fd3d1a46ed04df8d20d5"
+source = "git+https://github.com/eeeeeta/glitch-in-the-matrix?branch=develop#46d883fd0abe2fde8468ee6809f8bbe169a42431"
 dependencies = [
  "serde 1.0.29 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_derive 1.0.29 (registry+https://github.com/rust-lang/crates.io-index)",
