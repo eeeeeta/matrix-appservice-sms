@@ -31,7 +31,7 @@ use serde_json::Value;
 use rocket::http::Status;
 use rocket::response::status;
 use gm::types::replies::BadRequestReply;
-use gm::types::events::{Event, Events};
+use gm::types::events::Events;
 use diesel::prelude::*;
 use models::PutRequest;
 
@@ -65,8 +65,8 @@ fn tx_put(txnid: String, access: HsToken, txn: Json<Events>, db: DbConn, hdl: Me
         return Ok(status::Custom(Status::Ok, Json(json! {{ }})))
     }
     for evt in txn.0.events {
-        if let Event::Full(meta, content) = evt {
-            hdl.tx.unbounded_send(IntMessage::MatrixEvent(meta, content))
+        if evt.room_data.is_some() {
+            hdl.tx.unbounded_send(IntMessage::MatrixEvent(evt))
                 .expect("failed to send events to future");
         }
     }

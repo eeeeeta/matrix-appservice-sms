@@ -5,8 +5,8 @@ use huawei_modem::HuaweiModem;
 use futures::sync::mpsc::{UnboundedSender, UnboundedReceiver, self};
 use gm::MatrixClient;
 use gm::types::messages::Message;
-use gm::types::events::MetaFull;
 use gm::types::content::Content;
+use gm::types::events::{RoomEventData, Event};
 use gm::types::content::room::types::Membership;
 use gm::types::content::room::PowerLevels;
 use gm::profile::Profile;
@@ -59,7 +59,9 @@ pub struct CsmsData {
 pub enum IntMessage {
     CmglComplete(Vec<SmsMessage>),
     CmglFailed(HuaweiError),
-    MatrixEvent(MetaFull, Content)
+    MatrixEvent(Event),
+    SendSucceeded(RoomEventData),
+    SendFailed(RoomEventData, Error)
 }
 enum AdminCommand {
     NewConversation(PduAddress),
@@ -117,7 +119,7 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
             .expect("tokio reactor core");
         let mut modem = HuaweiModem::new_from_path(modem, &core.handle())
             .expect("modem initialization");
-        let mx = MatrixClient::new_appservice(
+        let mx = MatrixClient::as_new(
             hs_url.into(),
             format!("@_sms_bot:{}", hs_localpart),
             as_token.into(),
@@ -167,7 +169,7 @@ impl MessagingFuture {
 
         async_block! {
             let UserAndRoomDetails { user_id, room } = await!(details)?;
-            mx.alter_user_id(user_id.clone());
+            mx.as_alter_user_id(user_id.clone());
             let jm = await!(room.cli(&mut mx).get_joined_members())?;
             if jm.joined.get(&admin).is_none() {
                 if let Err(e) = await!(room.cli(&mut mx).invite_user(&admin)) {
@@ -236,7 +238,7 @@ impl MessagingFuture {
                 };
                 let rpl = await!(Room::create(&mut mx, opts))?;
                 info!("Joining new room");
-                mx.alter_user_id(mxid.clone());
+                mx.as_alter_user_id(mxid.clone());
                 await!(Room::join(&mut mx, &rpl.id))?;
                 {
                     use schema::recipients;
@@ -264,7 +266,7 @@ impl MessagingFuture {
         let fut = self.get_user_and_room(msg.pdu.originating_address.clone());
         async_block! {
             let UserAndRoomDetails { room, user_id } = await!(fut)?;
-            mx.alter_user_id(user_id);
+            mx.as_alter_user_id(user_id);
             let DecodedMessage { mut text, udh } = msg.pdu.get_message_data().decode_message()?;
             let data = udh.as_ref().and_then(|x| x.get_concatenated_sms_data());
             if let Some(data) = data {
@@ -488,95 +490,110 @@ impl Future for MessagingFuture {
                 IntMessage::CmglFailed(e) => {
                     error!("Message listing failed: {}", e);
                 },
-                IntMessage::MatrixEvent(meta, content) => {
-                    if meta.sender.starts_with("@_sms") {
+                IntMessage::SendSucceeded(rd) => {
+                    let mut mx = self.mx.clone();
+                    let fut = async_block! {
+                        let res = await!(rd.room.cli(&mut mx).read_receipt(&rd.event_id));
+                        if let Err(e) = res {
+                            warn!("Error sending read receipt: {}", e);
+                        }
+                        else {
+                            debug!("Sent read receipt.");
+                        }
+                        let res: Result<(), ()> = Ok(());
+                        res
+                    };
+                    self.handle.spawn(fut);
+                },
+                IntMessage::SendFailed(rd, e) => {
+                    let mut mx = self.mx.clone();
+                    let fut = async_block! {
+                        warn!("Error sending message: {}", e);
+                        let disp = await!(Profile::get_displayname(&mut mx, &rd.sender));
+                        if let Err(e) = disp {
+                            error!("Error sending 'error sending message' message (getting displayname): {}", e);
+                            let res: Result<(), ()> = Ok(());
+                            return res;
+                        }
+                        let disp = disp.unwrap();
+                        let message = Message::Text {
+                            body: format!("{}: error sending message: {}", disp.displayname, e),
+                            format: Some("org.matrix.custom.html".into()),
+                            formatted_body: Some(format!("<a href=\"https://matrix.to/#/{}\">{}</a>: error sending message: <pre>{}</pre>",
+                                                         rd.sender,
+                                                         disp.displayname,
+                                                         e))
+                        };
+                        let res = await!(rd.room.cli(&mut mx).send(message));
+                        if let Err(e) = res {
+                            error!("Error sending 'error sending message' message: {}", e);
+                        }
+                        else {
+                            debug!("Sent error notif.");
+                        }
+                        Ok(())
+                    };
+                    self.handle.spawn(fut);
+                },
+                IntMessage::MatrixEvent(evt) => {
+                    let rd = match evt.room_data {
+                        Some(ref rd) => rd,
+                        None => {
+                            error!("Sent event with no room data!");
+                            continue;
+                        }
+                    };
+                    if rd.sender.starts_with("@_sms") {
                         continue;
                     }
-                    match content {
+                    match evt.content {
                         Content::RoomMember(m) => {
-                            if let Some(invitee) = meta.state_key {
-                                if let Some(room) = meta.room {
-                                    if let Membership::Invite = m.membership {
-                                        if invitee == format!("@_sms_bot:{}", self.hs_localpart) {
-                                            info!("Invited by {} to {}", meta.sender, room.id);
-                                            let fut = self.process_invite(room)
-                                                .map_err(|e| error!("Failed to process invite: {}", e));
-                                            self.handle.spawn(fut);
-                                        }
+                            if let Some(ref sd) = evt.state_data {
+                                if let Membership::Invite = m.membership {
+                                    if sd.state_key == format!("@_sms_bot:{}", self.hs_localpart) {
+                                        info!("Invited by {} to {}", rd.sender, rd.room.id);
+                                        let fut = self.process_invite(rd.room.clone())
+                                            .map_err(|e| error!("Failed to process invite: {}", e));
+                                        self.handle.spawn(fut);
                                     }
                                 }
                             }
                         },
                         Content::RoomMessage(m) => {
-                            if let Some(room) = meta.room {
-                                let conn = self.db.get().expect("couldn't get a db connection");
-                                let recv = {
-                                    use schema::recipients::dsl::*;
+                            let conn = self.db.get().expect("couldn't get a db connection");
+                            let recv = {
+                                use schema::recipients::dsl::*;
 
-                                    recipients.filter(room_id.eq(&room.id))
-                                        .first::<Recipient>(&*conn)
-                                        .optional()?
-                                };
-                                if let Some(recv) = recv {
-                                    let mut mx = self.mx.clone();
-                                    let sender = meta.sender.clone();
-                                    let ei = meta.event_id;
-                                    debug!("Sending message from {}: {:?}", meta.sender, m);
-                                    let fut = self.process_sending_message(recv, meta.sender, m)
-                                        .then(move |res| {
-                                            async_block! {
-                                                if let Err(e) = res {
-                                                    warn!("Error sending message: {}", e);
-                                                    let disp = await!(Profile::get_displayname(&mut mx, &sender));
-                                                    if let Err(e) = disp {
-                                                        error!("Error sending 'error sending message' message (getting displayname): {}", e);
-                                                        let res: Result<(), ()> = Ok(());
-                                                        return res;
-                                                    }
-                                                    let disp = disp.unwrap();
-                                                    let message = Message::Text {
-                                                        body: format!("{}: error sending message: {}", disp.displayname, e),
-                                                        format: Some("org.matrix.custom.html".into()),
-                                                        formatted_body: Some(format!("<a href=\"https://matrix.to/#/{}\">{}</a>: error sending message: <pre>{}</pre>",
-                                                                                     sender,
-                                                                                     disp.displayname,
-                                                                                     e))
-                                                    };
-                                                    let res = await!(room.cli(&mut mx).send(message));
-                                                    if let Err(e) = res {
-                                                        error!("Error sending 'error sending message' message: {}", e);
-                                                    }
-                                                    else {
-                                                        debug!("Sent error notif.");
-                                                    }
-                                                }
-                                                else {
-                                                    let res = await!(room.cli(&mut mx).read_receipt(&ei));
-                                                    if let Err(e) = res {
-                                                        warn!("Error sending read receipt: {}", e);
-                                                    }
-                                                    else {
-                                                        debug!("Sent read receipt.");
-                                                    }
-                                                }
-                                                let res: Result<(), ()> = Ok(());
-                                                res
-                                            }
-                                        });
-                                    self.handle.spawn(fut);
-                                }
-                                else {
-                                    if let Message::Text { ref body, .. } = m {
-                                        if meta.sender == self.admin && body.starts_with("!") {
-                                            info!("Processing admin message: {}", body);
-                                            let fut = self.process_admin_command(meta.sender, room, body)
-                                                .map_err(|e| error!("Failed to process admin message: {}", e));
-                                            self.handle.spawn(fut);
-                                            continue;
-                                        }
+                                recipients.filter(room_id.eq(&rd.room.id))
+                                    .first::<Recipient>(&*conn)
+                                    .optional()?
+                            };
+                            let rd = rd.clone();
+                            if let Some(recv) = recv {
+                                let tx = self.int_tx.clone();
+                                debug!("Sending message from {}: {:?}", rd.sender, m);
+                                let fut = self.process_sending_message(recv, rd.sender.clone(), m)
+                                    .then(move |res| {
+                                        let res = match res {
+                                            Ok(_) => tx.unbounded_send(IntMessage::SendSucceeded(rd)),
+                                            Err(e) => tx.unbounded_send(IntMessage::SendFailed(rd, e))
+                                        };
+                                        res.unwrap();
+                                        Ok(())
+                                    });
+                                self.handle.spawn(fut);
+                            }
+                            else {
+                                if let Message::Text { ref body, .. } = m {
+                                    if rd.sender == self.admin && body.starts_with("!") {
+                                        info!("Processing admin message: {}", body);
+                                        let fut = self.process_admin_command(rd.sender, rd.room, body)
+                                            .map_err(|e| error!("Failed to process admin message: {}", e));
+                                        self.handle.spawn(fut);
+                                        continue;
                                     }
-                                    warn!("No recipient for event {}: {:?}", meta.event_id, m);
                                 }
+                                warn!("No recipient for event {}: {:?}", rd.event_id, m);
                             }
                         },
                         x => debug!("Discarding event: {:?}", x)
