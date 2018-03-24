@@ -65,7 +65,9 @@ fn tx_put(txnid: String, access: HsToken, txn: Json<Events>, db: DbConn, hdl: Me
         return Ok(status::Custom(Status::Ok, Json(json! {{ }})))
     }
     for evt in txn.0.events {
+        trace!("processing event {:?}", evt);
         if evt.room_data.is_some() {
+            trace!("sending to future");
             hdl.tx.unbounded_send(IntMessage::MatrixEvent(evt))
                 .expect("failed to send events to future");
         }
