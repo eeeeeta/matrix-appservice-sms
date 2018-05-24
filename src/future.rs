@@ -135,6 +135,25 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
                                                         cmd::sms::NewMessageStorage::StoreAndNotify);
         core.run(fut)
             .expect("setting sms new message indications");
+        let tx = int_tx.clone();
+        let fut = cmd::sms::list_sms_pdu(&mut modem,
+                                         MessageStatus::All)
+            .then(move |results| {
+                match results {
+                    Ok(results) => {
+                        tx.unbounded_send(
+                            IntMessage::CmglComplete(results)).unwrap();
+                    },
+                    Err(e) => {
+                        tx.unbounded_send(
+                            IntMessage::CmglFailed(e)).unwrap();
+                    }
+                }
+                let res: Result<(), ()> = Ok(());
+                res
+            });
+        core.run(fut)
+            .expect("+CMGL on boot");
         let mfut = MessagingFuture {
             int_tx, int_rx, urc_rx, db,
             modem: Rc::new(RefCell::new(modem)),
