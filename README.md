@@ -41,6 +41,8 @@ Oh, man.
 
 - You need the latest *nightly* version of Rust installed; check out [their install page](https://www.rust-lang.org/en-US/install.html).
   If you install with `rustup`, change the default configuration when prompted to install the nightly toolchain.
+  - **NB: As of 2018-05-24, this project only works with rustc 1.27.0-nightly (e5f80f2a4 2018-05-09) - override your toolchain to use that nightly!**
+  - This can be done with `$ rustup override set nightly-2018-05-10`.
 - Build the project with `cargo build`.
 - Then, install `diesel_cli` with `cargo install diesel_cli`.
 
