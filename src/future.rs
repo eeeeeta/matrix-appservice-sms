@@ -10,7 +10,7 @@ use gm::types::events::{RoomEventData, Event};
 use gm::types::content::room::types::Membership;
 use gm::types::content::room::PowerLevels;
 use gm::profile::Profile;
-use gm::room::{RoomExt, Room};
+use gm::room::{RoomExt, Room, NewRoom};
 use gm::errors::MatrixError;
 use huawei_modem::at::AtResponse;
 use huawei_modem::cmd;
@@ -27,7 +27,7 @@ use pool::Pool;
 use std::sync::Arc;
 use std::rc::Rc;
 use std::cell::RefCell;
-use std::convert::TryFrom;
+use huawei_modem::convert::TryFrom;
 use std::collections::BTreeMap;
 
 pub fn normalize_address(addr: &PduAddress) -> String {
@@ -236,10 +236,10 @@ impl MessagingFuture {
                     visibility: Some(RoomVisibility::Private),
                     ..Default::default()
                 };
-                let rpl = await!(Room::create(&mut mx, opts))?;
+                let rpl = await!(NewRoom::create(&mut mx, opts))?;
                 info!("Joining new room");
                 mx.as_alter_user_id(mxid.clone());
-                await!(Room::join(&mut mx, &rpl.id))?;
+                await!(NewRoom::join(&mut mx, &rpl.id))?;
                 {
                     use schema::recipients;
 
@@ -331,7 +331,7 @@ impl MessagingFuture {
     fn process_invite(&self, room: Room<'static>) -> impl Future<Item = (), Error = Error> {
         let mut mx = self.mx.clone();
         async_block! {
-            await!(Room::join(&mut mx, &room.id))?;
+            await!(NewRoom::join(&mut mx, &room.id))?;
             Ok(())
         }
     }
@@ -493,7 +493,7 @@ impl Future for MessagingFuture {
                 IntMessage::SendSucceeded(rd) => {
                     let mut mx = self.mx.clone();
                     let fut = async_block! {
-                        let res = await!(rd.room.cli(&mut mx).read_receipt(&rd.event_id));
+                        let res = await!(rd.room.as_ref().unwrap().cli(&mut mx).read_receipt(&rd.event_id));
                         if let Err(e) = res {
                             warn!("Error sending read receipt: {}", e);
                         }
@@ -524,7 +524,7 @@ impl Future for MessagingFuture {
                                                          disp.displayname,
                                                          e))
                         };
-                        let res = await!(rd.room.cli(&mut mx).send(message));
+                        let res = await!(rd.room.as_ref().unwrap().cli(&mut mx).send(message));
                         if let Err(e) = res {
                             error!("Error sending 'error sending message' message: {}", e);
                         }
@@ -543,6 +543,13 @@ impl Future for MessagingFuture {
                             continue;
                         }
                     };
+                    let room = match rd.room {
+                        Some(ref r) => r,
+                        None => {
+                            error!("Sent event with no room!");
+                            continue;
+                        }
+                    };
                     if rd.sender.starts_with("@_sms") {
                         continue;
                     }
@@ -551,8 +558,8 @@ impl Future for MessagingFuture {
                             if let Some(ref sd) = evt.state_data {
                                 if let Membership::Invite = m.membership {
                                     if sd.state_key == format!("@_sms_bot:{}", self.hs_localpart) {
-                                        info!("Invited by {} to {}", rd.sender, rd.room.id);
-                                        let fut = self.process_invite(rd.room.clone())
+                                        info!("Invited by {} to {}", rd.sender, room.id);
+                                        let fut = self.process_invite(room.clone())
                                             .map_err(|e| error!("Failed to process invite: {}", e));
                                         self.handle.spawn(fut);
                                     }
@@ -564,7 +571,7 @@ impl Future for MessagingFuture {
                             let recv = {
                                 use schema::recipients::dsl::*;
 
-                                recipients.filter(room_id.eq(&rd.room.id))
+                                recipients.filter(room_id.eq(&room.id))
                                     .first::<Recipient>(&*conn)
                                     .optional()?
                             };
@@ -587,7 +594,7 @@ impl Future for MessagingFuture {
                                 if let Message::Text { ref body, .. } = m {
                                     if rd.sender == self.admin && body.starts_with("!") {
                                         info!("Processing admin message: {}", body);
-                                        let fut = self.process_admin_command(rd.sender, rd.room, body)
+                                        let fut = self.process_admin_command(rd.sender, room.clone(), body)
                                             .map_err(|e| error!("Failed to process admin message: {}", e));
                                         self.handle.spawn(fut);
                                         continue;

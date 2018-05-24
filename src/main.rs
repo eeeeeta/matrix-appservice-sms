@@ -1,4 +1,4 @@
-#![feature(plugin, try_from, proc_macro, custom_derive, conservative_impl_trait, generators, advanced_slice_patterns, slice_patterns)]
+#![feature(plugin, try_from, proc_macro, custom_derive, generators, proc_macro_non_items, slice_patterns)]
 #![plugin(rocket_codegen)]
 
 extern crate rocket;
