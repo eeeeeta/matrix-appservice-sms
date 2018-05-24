@@ -13,15 +13,21 @@ extern crate r2d2_diesel;
 extern crate huawei_modem;
 extern crate futures_await as futures;
 extern crate tokio_core;
+extern crate tokio_timer;                            
 #[macro_use] extern crate failure;
 #[macro_use] extern crate log;
 extern crate env_logger;
 #[macro_use] extern crate serde_derive;
 
 mod pool;
+mod users;
 mod future;
 mod schema;
+mod sms_processor;
+mod recipient_factory;
+mod store;
 mod models;
+mod util;
 
 use rocket::fairing::AdHoc;
 use pool::DbConn;

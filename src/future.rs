@@ -8,58 +8,38 @@ use gm::types::messages::Message;
 use gm::types::content::Content;
 use gm::types::events::{RoomEventData, Event};
 use gm::types::content::room::types::Membership;
-use gm::types::content::room::PowerLevels;
 use gm::profile::Profile;
 use gm::room::{RoomExt, Room, NewRoom};
-use gm::errors::MatrixError;
 use huawei_modem::at::AtResponse;
 use huawei_modem::cmd;
 use huawei_modem::cmd::sms::{SmsMessage, MessageStatus, DeletionOptions};
-use huawei_modem::pdu::{PduAddress, AddressType, Pdu};
-use huawei_modem::gsm_encoding::{DecodedMessage, GsmMessageData};
+use huawei_modem::pdu::{PduAddress, Pdu, DeliverPdu, HexData};
+use huawei_modem::gsm_encoding::{GsmMessageData};
 use huawei_modem::errors::HuaweiError;
+use huawei_modem::convert::TryFrom;
+use tokio_timer::{Interval, Delay};
+use std::time::{Duration, Instant};
 use futures::{Future, Stream, Poll, Async};
 use futures::prelude::*;
-use diesel::prelude::*;
-use models::{Recipient, NewRecipient};
+use models::{Recipient, NewMessage};
+use recipient_factory::RecipientFactory;
 use failure::Error;
 use pool::Pool;
+use users::{UserHandle, UserMessage};
 use std::sync::Arc;
 use std::rc::Rc;
 use std::cell::RefCell;
-use huawei_modem::convert::TryFrom;
-use std::collections::BTreeMap;
+use store::Store;
+use std::collections::HashMap;
+use util;
 
-pub fn normalize_address(addr: &PduAddress) -> String {
-    let ton: u8 = addr.type_addr.into();
-    let mut ret = format!("{:02X}", ton);
-    for b in addr.number.0.iter() {
-        ret += &format!("{}", b);
-    }
-    ret
-}
-pub fn un_normalize_address(addr: &str) -> Option<PduAddress> {
-    if addr.len() < 3 {
-        return None;
-    }
-    let toa = u8::from_str_radix(&addr[0..2], 16).ok()?;
-    let toa = AddressType::try_from(toa).ok()?;
-    let mut addr: PduAddress = addr.parse().unwrap();
-    addr.number.0.remove(0);
-    addr.number.0.remove(0);
-    addr.type_addr = toa;
-    Some(addr)
-}
-#[derive(Serialize, Deserialize)]
-pub struct CsmsData {
-    pub parts: BTreeMap<u8, String>,
-    pub total_parts: u8,
-    pub finished: bool
-}
 pub enum IntMessage {
+    CmglRequest,
     CmglComplete(Vec<SmsMessage>),
     CmglFailed(HuaweiError),
     MatrixEvent(Event),
+    RegisterHandle(PduAddress, UserHandle),
+    RegisterFailed(PduAddress, ::failure::Error),
     SendSucceeded(RoomEventData),
     SendFailed(RoomEventData, Error)
 }
@@ -76,10 +56,13 @@ pub struct MessagingFuture {
     int_tx: UnboundedSender<IntMessage>,
     int_rx: UnboundedReceiver<IntMessage>,
     urc_rx: UnboundedReceiver<AtResponse>,
+    recipients: HashMap<PduAddress, UserHandle>,
+    recipients_inflight: HashMap<PduAddress, Vec<i32>>,
     handle: Handle,
-    db: Pool,
+    store: Store,
     admin: String,
     hs_localpart: String,
+    register_failures: usize,
     mx: Mx
 }
 pub type MessagingHandle<'a> = State<'a, Arc<MessagingData>>;
@@ -110,6 +93,8 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
     let hs_url = rocket.config().get_str("hs_url")
         .expect("'hs_url' in config")
         .to_string();
+    let cmgl_secs = rocket.config().get_int("cmgl_secs")
+        .unwrap_or(0);
 
     let (int_tx, int_rx) = mpsc::unbounded();
     let (rtx, rrx) = ::std::sync::mpsc::channel();
@@ -133,10 +118,63 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
         let fut = cmd::sms::set_new_message_indications(&mut modem,
                                                         cmd::sms::NewMessageNotification::SendDirectlyOrBuffer,
                                                         cmd::sms::NewMessageStorage::StoreAndNotify);
-        core.run(fut)
-            .expect("setting sms new message indications");
+        match core.run(fut) {
+            Ok(_) => {},
+            Err(e) => {
+                warn!("Failed setting CNMI settings: {}", e);
+                warn!("Your modem may not support the +CNMI setting.");
+                if cmgl_secs < 0 {
+                    error!("You MUST configure a value for cmgl_secs for the bridge to work properly!");
+                    panic!("You need a cmgl_secs value in the config.");
+                }
+            }
+        }
         let tx = int_tx.clone();
-        let fut = cmd::sms::list_sms_pdu(&mut modem,
+        if cmgl_secs > 0 {
+            info!("Triggering a CMGL every {} secs", cmgl_secs);
+            let fut = Interval::new(Instant::now(), Duration::new(cmgl_secs as _, 0))
+                .map_err(|e| {
+                    panic!("Timer failed: {}", e);
+                })
+            .for_each(move |_| {
+                tx.unbounded_send(IntMessage::CmglRequest).unwrap();
+                Ok(())
+            });
+            core.handle().spawn(fut);
+        }
+        let store = Store {
+            inner: db
+        };
+        let mut mfut = MessagingFuture {
+            int_tx, int_rx, urc_rx, store,
+            modem: Rc::new(RefCell::new(modem)),
+            recipients: HashMap::new(),
+            recipients_inflight: HashMap::new(),
+            handle: core.handle(),
+            admin: admin.into(),
+            hs_localpart: hs_localpart.into(),
+            register_failures: 0,
+            mx: Rc::new(RefCell::new(mx))
+        };
+        rtx.send(core.remote())
+            .expect("sending remote");
+        mfut.cmgl();
+        error!("MessagingFuture exited: {:?}", core.run(mfut));
+        panic!("MessagingFuture exited; the end is nigh!");
+    });
+    let remote = rrx.recv()
+        .expect("receiving remote from futures thread");
+    let md = MessagingData {
+        rem: remote,
+        hs_token,
+        tx: itx2
+    };
+    rocket.manage(Arc::new(md))
+}
+impl MessagingFuture {
+    fn cmgl(&mut self) {
+        let tx = self.int_tx.clone();
+        let fut = cmd::sms::list_sms_pdu(&mut self.modem.borrow_mut(),
                                          MessageStatus::All)
             .then(move |results| {
                 match results {
@@ -152,199 +190,42 @@ pub fn attach_tokio(rocket: Rocket) -> Rocket {
                 let res: Result<(), ()> = Ok(());
                 res
             });
-        core.run(fut)
-            .expect("+CMGL on boot");
-        let mfut = MessagingFuture {
-            int_tx, int_rx, urc_rx, db,
-            modem: Rc::new(RefCell::new(modem)),
-            handle: core.handle(),
-            admin: admin.into(),
-            hs_localpart: hs_localpart.into(),
-            mx: Rc::new(RefCell::new(mx))
-        };
-        rtx.send(core.remote())
-            .expect("sending remote");
-        error!("MessagingFuture exited: {:?}", core.run(mfut));
-        panic!("MessagingFuture exited; the end is nigh!");
-    });
-    let remote = rrx.recv()
-        .expect("receiving remote from futures thread");
-    let md = MessagingData {
-        rem: remote,
-        hs_token,
-        tx: itx2
-    };
-    rocket.manage(Arc::new(md))
-}
-struct UserAndRoomDetails {
-    user_id: String,
-    room: Room<'static>
-}
-impl MessagingFuture {
-    fn get_user_and_room(&self, addr_orig: PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
-        let details = self.get_user_and_room_simple(addr_orig);
-        let mut mx = self.mx.borrow().clone();
-        let admin = self.admin.clone();
-
-        async_block! {
-            let UserAndRoomDetails { user_id, room } = await!(details)?;
-            mx.as_alter_user_id(user_id.clone());
-            let jm = await!(room.cli(&mut mx).get_joined_members())?;
-            if jm.joined.get(&admin).is_none() {
-                if let Err(e) = await!(room.cli(&mut mx).invite_user(&admin)) {
-                    error!("Error inviting user {} to room {}: {}", admin, room.id, e);
-                }
-            }
-            let pl = await!(room.cli(&mut mx).get_user_power_level(admin.clone()))?;
-            if pl < 100 {
-                if let Ok(mut pl) = await!(room.cli(&mut mx).get_typed_state::<PowerLevels>("m.room.power_levels", None)) {
-                    pl.users.insert(admin.clone(), 100);
-                    if let Err(e) = await!(room.cli(&mut mx).set_typed_state::<PowerLevels>("m.room.power_levels", None, pl)) {
-                        error!("Error setting powerlevels of user {} in room {}: {}", admin, room.id, e);
-                    }
-                }
-            }
-            Ok(UserAndRoomDetails { user_id, room })
-        }
-
+        self.handle.spawn(fut);
     }
-    fn get_user_and_room_simple(&self, addr_orig: PduAddress) -> impl Future<Item = UserAndRoomDetails, Error = Error> {
-        use gm::types::replies::{RoomCreationOptions, RoomPreset, RoomVisibility};
-
-        let mut mx = self.mx.borrow().clone();
-        let hsl = self.hs_localpart.clone();
-
-        let addr = normalize_address(&addr_orig);
-        let conn = self.db.get().expect("couldn't get a db connection");
-        let recv = {
-            use schema::recipients::dsl::*;
-
-            recipients.filter(phone_number.eq(&addr))
-                .first::<Recipient>(&*conn)
-                .optional()
-        };
-        async_block! {
-            if let Some(recv) = recv? {
-                Ok(UserAndRoomDetails {
-                    user_id: format!("@{}:{}", recv.user_id, hsl),
-                    room: Room::from_id(recv.room_id)
-                })
-            } else {
-                let localpart = format!("_sms_{}", addr);
-                let mxid = format!("@{}:{}", localpart, hsl);
-                info!("Registering new user {}", mxid);
-                if let Err(e) = await!(mx.as_register_user(localpart.clone())) {
-                    let mut good = false;
-                    if let MatrixError::BadRequest(ref e) = e {
-                        if e.errcode == "M_USER_IN_USE" {
-                            // probably already registered it
-                            good = true;
-                        }
-                    }
-                    if !good {
-                        return Err(e)?;
-                    }
-                }
-                info!("Creating new room");
-                let opts = RoomCreationOptions {
-                    preset: Some(RoomPreset::TrustedPrivateChat),
-                    is_direct: true,
-                    invite: vec![mxid.clone()],
-                    room_alias_name: Some(format!("_sms_{}", addr)),
-                    name: Some(format!("{} (SMS)", addr_orig)),
-                    visibility: Some(RoomVisibility::Private),
-                    ..Default::default()
-                };
-                let rpl = await!(NewRoom::create(&mut mx, opts))?;
-                info!("Joining new room");
-                mx.as_alter_user_id(mxid.clone());
-                await!(NewRoom::join(&mut mx, &rpl.id))?;
-                {
-                    use schema::recipients;
-
-                    let new_recipient = NewRecipient {
-                        phone_number: &addr,
-                        user_id: &localpart,
-                        room_id: &rpl.id
-                    };
-                    ::diesel::insert_into(recipients::table)
-                        .values(&new_recipient)
-                        .execute(&*conn)?;
-                }
-                Ok(UserAndRoomDetails {
-                    user_id: mxid,
-                    room: rpl
-                })
+    fn prod_recipient(&mut self, addr: PduAddress, mid: Option<i32>) {
+        if let Some(ids) = self.recipients_inflight.get_mut(&addr) {
+            if let Some(mid) = mid {
+                ids.push(mid);
             }
+            return;
         }
-    }
-    fn process_received_message(&self, msg: SmsMessage) -> impl Future<Item = (), Error = Error> {
-        let mut mx = self.mx.borrow().clone();
-
-        info!("Processing message received from {}", msg.pdu.originating_address);
-        let fut = self.get_user_and_room(msg.pdu.originating_address.clone());
-        async_block! {
-            let UserAndRoomDetails { room, user_id } = await!(fut)?;
-            mx.as_alter_user_id(user_id);
-            let DecodedMessage { mut text, udh } = msg.pdu.get_message_data().decode_message()?;
-            let data = udh.as_ref().and_then(|x| x.get_concatenated_sms_data());
-            if let Some(data) = data {
-                info!("Message is concatenated - data {:?}", data);
-                let sk = format!("ref-{}", data.reference);
-                let mut state = match await!(room.cli(&mut mx).get_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk))) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let mut val = None;
-                        if let MatrixError::BadRequest(ref e) = e {
-                            if e.errcode == "M_NOT_FOUND" {
-                                val = Some(CsmsData {
-                                    parts: BTreeMap::new(),
-                                    total_parts: data.parts,
-                                    finished: false
-                                });
-                            }
-                        }
-                        if let Some(val) = val {
-                            val
-                        }
-                        else {
-                            return Err(e.into());
-                        }
-                    }
-                };
-                if state.total_parts != data.parts || state.finished {
-                    info!("Remaking CsmsData");
-                    state = CsmsData {
-                        parts: BTreeMap::new(),
-                        total_parts: data.parts,
-                        finished: false
-                    }
-                }
-                state.parts.insert(data.sequence, ::std::mem::replace(&mut text, String::new()));
-                if state.parts.len() >= state.total_parts as usize {
-                    info!("Concatenated SMS finished; sending real message");
-                    let mut ret = String::new();
-                    for (_, text) in state.parts.iter() {
-                        ret += text;
-                    }
-                    state.finished = true;
-                    text = ret;
-                }
-                let finished = state.finished;
-                await!(room.cli(&mut mx).set_typed_state::<CsmsData>("org.eu.theta.sms.concatenated", Some(&sk), state))?;
-                if !finished {
-                    info!("Concatenated SMS incomplete; not continuing");
-                    return Ok(());
-                }
-            }
-            let msg = Message::Text {
-                body: text,
-                formatted_body: None,
-                format: None
+        if let Some(hdl) = self.recipients.get_mut(&addr) {
+            hdl.ctl.unbounded_send(UserMessage::ProcessNew).unwrap();
+        }
+        else {
+            let factory = RecipientFactory {
+                store: self.store.clone(),
+                hdl: self.handle.clone(),
+                addr: addr.clone(),
+                mx: self.mx.borrow().clone(),
+                admin: self.admin.clone(),
+                hs_localpart: self.hs_localpart.clone()
             };
-            debug!("Sending message {:?} to room {}", msg, room.id);
-            await!(room.cli(&mut mx).send(msg))?;
-            Ok(())
+            let tx = self.int_tx.clone();
+            let mut ids = vec![];
+            if let Some(id) = mid {
+                ids.push(id);
+            }
+            self.recipients_inflight.insert(addr.clone(), ids);
+            let fut = factory.run()
+                .then(move |res| {
+                    let _ = match res {
+                        Ok(hdl) => tx.unbounded_send(IntMessage::RegisterHandle(addr, hdl)),
+                        Err(e) => tx.unbounded_send(IntMessage::RegisterFailed(addr, e))
+                    };
+                    Ok(())
+                });
+            self.handle.spawn(fut);
         }
     }
     fn process_invite(&self, room: Room<'static>) -> impl Future<Item = (), Error = Error> {
@@ -354,7 +235,7 @@ impl MessagingFuture {
             Ok(())
         }
     }
-    fn process_admin_command(&self, sender: String, room: Room<'static>, text: &str) -> Box<Future<Item = (), Error = Error>> {
+    fn process_admin_command(&mut self, sender: String, room: Room<'static>, text: &str) -> Box<Future<Item = (), Error = Error>> {
         let mut mx = self.mx.clone();
         let modem = self.modem.clone();
         info!("Processing admin command {} from {}", text, sender);
@@ -371,10 +252,8 @@ impl MessagingFuture {
         match cmd {
             AdminCommand::NewConversation(addr) => {
                 info!("Creating new conversation with {}", addr);
-                let fut = self.get_user_and_room(addr.clone());
+                self.prod_recipient(addr, None);
                 Box::new(async_block! {
-                    let _ = await!(fut)?;
-                    await!(room.cli(&mut mx).send_simple(format!("New conversation with {} created.", addr)))?;
                     Ok(())
                 })
             },
@@ -420,7 +299,7 @@ Currently supported commands:
         let modem = self.modem.clone();
 
         async_block! {
-            let num = un_normalize_address(&recv.phone_number)
+            let num = util::un_normalize_address(&recv.phone_number)
                 .ok_or(format_err!("Invalid address in database - this shouldn't really ever happen"))?;
             let text = match rm {
                 Message::Text { body, .. } => body,
@@ -463,46 +342,98 @@ impl Future for MessagingFuture {
             if let AtResponse::InformationResponse { param, .. } = x {
                 if param == "+CMTI" {
                     debug!("Received +CMTI indication");
-                    let tx = self.int_tx.clone();
-                    let fut = cmd::sms::list_sms_pdu(&mut self.modem.borrow_mut(),
-                                                     MessageStatus::All)
-                        .then(move |results| {
-                            match results {
-                                Ok(results) => {
-                                    tx.unbounded_send(
-                                        IntMessage::CmglComplete(results)).unwrap();
-                                },
-                                Err(e) => {
-                                    tx.unbounded_send(
-                                        IntMessage::CmglFailed(e)).unwrap();
-                                }
-                            }
-                            Ok(())
-                        });
-                    self.handle.spawn(fut);
+                    self.cmgl();
                 }
             }
         }
         while let Async::Ready(x) = self.int_rx.poll().unwrap() {
             let x = x.expect("int_rx stopped producing");
             match x {
+                IntMessage::CmglRequest => {
+                    self.cmgl();
+                },
                 IntMessage::CmglComplete(res) => {
-                    info!("+CMGL complete");
+                    debug!("+CMGL complete");
                     for msg in res {
                         debug!("Processing message: {:?}", msg);
                         if msg.status != MessageStatus::ReceivedUnread {
                             continue;
                         }
-                        let fut = self.process_received_message(msg)
-                            .map_err(|e| {
-                                error!("Failed to process received message: {}", e);
-                            });
-                        self.handle.spawn(fut);
+                        let recv = self.store.get_recipient_for_address(&msg.pdu.originating_address)?;
+                        if let Some(recv) = recv {
+                            let nm = NewMessage {
+                                recipient_id: Some(recv.id),
+                                pdu: &msg.raw_pdu
+                            };
+                            let m = self.store.create_message(nm)?;
+                            info!("[M-{}] Message created from {} with recipient", m.id, msg.pdu.originating_address);
+                            self.prod_recipient(msg.pdu.originating_address, None);
+                        }
+                        else {
+                            let nm = NewMessage {
+                                recipient_id: None,
+                                pdu: &msg.raw_pdu
+                            };
+                            let m = self.store.create_message(nm)?;
+                            info!("[M-{}] Message created from {} WITHOUT recipient", m.id, msg.pdu.originating_address);
+                            self.prod_recipient(msg.pdu.originating_address, Some(m.id));
+                        }
+                    }
+                    let recips = self.store.get_recipients_with_messages()?;
+                    for recip in recips {
+                        let recip = self.store.get_recipient_by_id(recip)?;
+                        let num = util::un_normalize_address(&recip.phone_number)
+                            .ok_or(format_err!("Invalid address in database - this shouldn't really ever happen"))?;
+                        info!("[C-{}] Prodding recipient for {}", recip.id, num);
+                        self.prod_recipient(num, None);
+                    }
+                    let orphaned = self.store.get_orphaned_messages()?;
+                    for orphan in orphaned {
+                        info!("[M-{}] Recovering orphan", orphan.id);
+                        match DeliverPdu::try_from(&orphan.pdu) {
+                            Ok(pdu) => {
+                                info!("[M-{}] Prodding recipient {} for orphan", orphan.id, pdu.originating_address);
+                                self.prod_recipient(pdu.originating_address, Some(orphan.id));
+                            },
+                            Err(e) => {
+                                error!("[M-{}] Dropping malformed message: {}", orphan.id, HexData(&orphan.pdu));
+                                error!("[M-{}] Parse error was: {}", orphan.id, e);
+                                self.store.delete_message(orphan.id)?;
+                            }
+                        }
                     }
                     let fut = cmd::sms::del_sms_pdu(&mut self.modem.borrow_mut(),
                                                     DeletionOptions::DeleteReadAndOutgoing)
                         .map_err(|e| {
                             error!("Failed to delete messages: {}", e);
+                        });
+                    self.handle.spawn(fut);
+                },
+                IntMessage::RegisterHandle(addr, hdl) => {
+                    self.register_failures += 0;
+                    let recv = self.store.get_recipient_for_address(&addr)?.unwrap();
+                    info!("[C-{}] Recipient registered for {}", recv.id, addr);
+                    self.recipients.insert(addr.clone(), hdl);
+                    let mids = self.recipients_inflight.remove(&addr).unwrap();
+                    info!("[C-{}] Parenting messages {:?} to recipient", recv.id, mids);
+                    self.store.set_recipient_for_messages(recv.id, &mids)?;
+                    self.prod_recipient(addr.clone(), None);
+                },
+                IntMessage::RegisterFailed(addr, e) => {
+                    self.recipients_inflight.remove(&addr);
+                    warn!("Creating recipient failed: {}", e);
+                    let tx = self.int_tx.clone();
+                    let now = Instant::now();
+                    self.register_failures += 1;
+                    let secs = 2u64.pow(self.register_failures as _);
+                    let dur = Duration::new(secs, 0);
+                    warn!("{} failure(s) to register - retrying in {} secs", self.register_failures, secs);
+                    let fut = Delay::new(now + dur)
+                        .map(move |_| {
+                            let _ = tx.unbounded_send(IntMessage::CmglRequest);
+                        })
+                        .map_err(move |e| {
+                            panic!("Timer failed: {}", e);
                         });
                     self.handle.spawn(fut);
                 },
@@ -586,14 +517,7 @@ impl Future for MessagingFuture {
                             }
                         },
                         Content::RoomMessage(m) => {
-                            let conn = self.db.get().expect("couldn't get a db connection");
-                            let recv = {
-                                use schema::recipients::dsl::*;
-
-                                recipients.filter(room_id.eq(&room.id))
-                                    .first::<Recipient>(&*conn)
-                                    .optional()?
-                            };
+                            let recv = self.store.get_recipient_for_room(&room.id)?;
                             let rd = rd.clone();
                             if let Some(recv) = recv {
                                 let tx = self.int_tx.clone();

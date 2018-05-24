@@ -3,12 +3,6 @@ authors = ["eeeeeta <eeeeeta@users.noreply.github.com>"]
 name = "matrix-appservice-sms"
 version = "0.1.0"
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-
 [dependencies]
 dotenv = "0.9"
 env_logger = "0.5"
@@ -23,6 +17,7 @@ serde = "1.0"
 serde_derive = "1.0"
 serde_json = "1.0"
 tokio-core = "0.1"
+tokio-timer = "0.2"
 
 [dependencies.diesel]
 features = ["postgres"]
@@ -32,8 +27,16 @@ version = "1.0"
 git = "https://github.com/alexcrichton/futures-await"
 
 [dependencies.glitch-in-the-matrix]
-git = "https://github.com/eeeeeta/glitch-in-the-matrix"
 branch = "develop"
+git = "https://github.com/eeeeeta/glitch-in-the-matrix"
 
 [dependencies.huawei-modem]
 git = "https://github.com/eeeeeta/huawei-modem"
+
+[profile]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
