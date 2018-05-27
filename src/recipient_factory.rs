@@ -5,7 +5,6 @@ use huawei_modem::pdu::PduAddress;
 use gm::types::content::room::PowerLevels;
 use gm::room::{RoomExt, Room, NewRoom};
 use gm::types::replies::{RoomCreationOptions, RoomPreset, RoomVisibility};
-use gm::types::content::Content;
 use gm::errors::MatrixError;
 use gm::profile::Profile;
 use gm::MatrixClient;
@@ -57,6 +56,7 @@ impl RecipientFactory {
                         is_direct: true,
                         invite: vec![mxid.clone()],
                         room_alias_name: Some(format!("_sms_{}", addr)),
+                        name: Some(format!("{} (SMS)", addr)),
                         visibility: Some(RoomVisibility::Private),
                         ..Default::default()
                     };
@@ -75,37 +75,9 @@ impl RecipientFactory {
             let room = Room::from_id(recip.room_id);
             let mxid = format!("@{}:{}", recip.user_id, self.hs_localpart);
             self.mx.as_alter_user_id(mxid.clone());
-            let cur_displayname = await!(Profile::get_displayname(&mut self.mx, &mxid));
-            if let Err(e) = cur_displayname {
-                if let MatrixError::HttpCode(sc) = e {
-                    if sc.as_u16() == 404 {
-                        await!(Profile::set_displayname(&mut self.mx, self.addr.to_string()))?;
-                    }
-                }
-            }
-            let ver = await!(room.cli(&mut self.mx).get_typed_state_opt::<RoomVersion>("org.eu.theta.sms.room_version", None))?;
-            if ver.is_none() {
-                info!("[C-{}] Upgrading to room version 0", recip.id);
-                let state = await!(room.cli(&mut self.mx).get_all_state())?;
-                for sev in state {
-                    // structured this way because of how generators work
-                    let mut del = false;
-                    if let Content::RoomName(_) = sev.content {
-                        if let Some(ref rd) = sev.room_data {
-                            if &rd.sender == &format!("@_sms_bot:{}", self.hs_localpart) as &str {
-                                del = true
-                            }
-                        }
-                    }
-                    if del {
-                        info!("[C-{}] Deleting name set by SMS bot", recip.id);
-                        let name = ::gm::types::content::room::Name {
-                            name: "".to_string()
-                        };
-                        await!(room.cli(&mut self.mx).set_typed_state("m.room.name", None, name))?;
-                    }
-                }
-                await!(room.cli(&mut self.mx).set_typed_state("org.eu.theta.sms.room_version", None, RoomVersion { version: 0 }))?;
+            let cur_displayname = await!(Profile::get_displayname(&mut self.mx, &mxid))?;
+            if cur_displayname.displayname != self.addr.to_string() {
+                await!(Profile::set_displayname(&mut self.mx, self.addr.to_string()))?;
             }
             let jm = await!(room.cli(&mut self.mx).get_joined_members())?;
             if jm.joined.get(&self.admin).is_none() {
