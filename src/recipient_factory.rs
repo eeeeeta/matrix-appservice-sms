@@ -89,17 +89,20 @@ impl RecipientFactory {
                 let state = await!(room.cli(&mut self.mx).get_all_state())?;
                 for sev in state {
                     // structured this way because of how generators work
-                    let mut evi = None;
+                    let mut del = false;
                     if let Content::RoomName(_) = sev.content {
                         if let Some(ref rd) = sev.room_data {
                             if &rd.sender == &format!("@_sms_bot:{}", self.hs_localpart) as &str {
-                                evi = Some(rd.event_id.clone());
+                                del = true
                             }
                         }
                     }
-                    if let Some(evi) = evi {
-                        info!("[C-{}] Redacting name set by SMS bot", recip.id);
-                        await!(room.cli(&mut self.mx).redact(&evi, Some("upgrading to version 0")))?;
+                    if del {
+                        info!("[C-{}] Deleting name set by SMS bot", recip.id);
+                        let name = ::gm::types::content::room::Name {
+                            name: "".to_string()
+                        };
+                        await!(room.cli(&mut self.mx).set_typed_state("m.room.name", None, name))?;
                     }
                 }
                 await!(room.cli(&mut self.mx).set_typed_state("org.eu.theta.sms.room_version", None, RoomVersion { version: 0 }))?;
