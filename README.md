@@ -16,6 +16,10 @@ it doesn't really make sense to support *more* than one user...
 - a **nightly** version of [Rust](http://rust-lang.org/); see below for details
 - a decent amount of patience ;p
 
+**You may also be interested in [sms-irc](https://github.com/eeeeeta/sms-irc), which is in many ways the successor to this project.**
+This project isn't *that* maintained at the moment, with work mainly being focused on sms-irc, but PRs and issues are still very much welcome
+and will receive attention!
+
 ## How do I set this up?
 
 Oh, man.
