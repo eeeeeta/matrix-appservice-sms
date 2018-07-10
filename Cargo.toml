@@ -4,7 +4,7 @@ name = "matrix-appservice-sms"
 version = "0.1.0"
 
 [dependencies]
-dotenv = "0.9"
+dotenv = "0.13"
 env_logger = "0.5"
 failure = "0.1"
 log = "0.4"
